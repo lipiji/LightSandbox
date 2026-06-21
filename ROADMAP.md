@@ -13,7 +13,8 @@
 
 ## v0.2
 - Streaming exec output
-- Sandbox pool
+- Sandbox pool (warm pool + reusable templates, in-process — no Kubernetes needed)
+- E2B-compatible API subset (pure API-shape work, no new runtime dependency)
 - SQLite metadata persistence
 - Metrics endpoint
 - Better process tree cleanup
@@ -26,7 +27,6 @@
 - Resource limit improvements
 
 ## v0.4
-- E2B-compatible API subset
 - Containerd runtime
 - Authentication token
 
