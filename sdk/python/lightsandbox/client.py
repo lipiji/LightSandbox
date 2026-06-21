@@ -83,14 +83,7 @@ class LightSandboxClient:
             raise LightSandboxConnectionError(str(exc)) from exc
 
         if not response.ok:
-            try:
-                data = response.json()
-            except ValueError as exc:
-                raise LightSandboxConnectionError(f"invalid response body: {exc}") from exc
-            error = data.get("error", {})
-            raise error_from_response(
-                error.get("code", "UNKNOWN"), error.get("message", "request failed")
-            )
+            self._raise_for_error(response)
 
         yield from _parse_sse(response)
 
@@ -104,6 +97,62 @@ class LightSandboxClient:
     def read_file(self, sandbox_id: str, path: str) -> dict[str, Any]:
         return self._request(
             "GET", f"/v1/sandboxes/{sandbox_id}/files", params={"path": path}
+        )
+
+    def upload_bytes(self, sandbox_id: str, path: str, data: bytes) -> None:
+        """Uploads raw bytes to `path` in the sandbox via multipart/form-data.
+
+        Binary-safe counterpart to `write_file` (which is UTF-8 text only —
+        JSON round-trips can't represent arbitrary bytes). Use this for any
+        non-text payload: images, archives, serialized blobs, etc.
+        """
+        url = f"{self.base_url}/v1/sandboxes/{sandbox_id}/files/upload"
+        try:
+            response = self._session.post(
+                url,
+                data={"path": path},
+                files={"file": (path, data)},
+                timeout=self.timeout,
+            )
+        except requests.RequestException as exc:
+            raise LightSandboxConnectionError(str(exc)) from exc
+
+        if not response.ok:
+            self._raise_for_error(response)
+
+    def download_bytes(self, sandbox_id: str, path: str) -> bytes:
+        """Downloads `path` from the sandbox as raw bytes.
+
+        Binary-safe counterpart to `read_file`. Returns the exact bytes
+        stored on disk — no UTF-8 decoding, no JSON wrapping.
+        """
+        url = f"{self.base_url}/v1/sandboxes/{sandbox_id}/files/download"
+        try:
+            response = self._session.get(
+                url, params={"path": path}, timeout=self.timeout
+            )
+        except requests.RequestException as exc:
+            raise LightSandboxConnectionError(str(exc)) from exc
+
+        if not response.ok:
+            self._raise_for_error(response)
+
+        return response.content
+
+    def _raise_for_error(self, response: requests.Response) -> None:
+        """Raises the typed SDK exception matching a non-2xx response body.
+
+        Factored out so the binary endpoints (which don't go through
+        `_request`'s JSON path) share the exact same error mapping as the
+        text endpoints.
+        """
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise LightSandboxConnectionError(f"invalid response body: {exc}") from exc
+        error = data.get("error", {})
+        raise error_from_response(
+            error.get("code", "UNKNOWN"), error.get("message", "request failed")
         )
 
     def _request(

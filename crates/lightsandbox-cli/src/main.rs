@@ -1,5 +1,5 @@
 use std::io::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 use futures_util::StreamExt;
@@ -57,6 +57,21 @@ enum Commands {
     },
     /// Read a file from a sandbox's workspace and print its content.
     Read { id: String, remote_path: String },
+    /// Upload a local file (binary-safe) into a sandbox via multipart.
+    /// Use this instead of `write` for non-text files.
+    Upload {
+        id: String,
+        local_path: PathBuf,
+        remote_path: String,
+    },
+    /// Download a file (binary-safe) from a sandbox. Writes to `local_path`
+    /// if given, otherwise to stdout. Use this instead of `read` for non-text
+    /// files.
+    Download {
+        id: String,
+        remote_path: String,
+        local_path: Option<PathBuf>,
+    },
     /// Remove a sandbox.
     Rm { id: String },
 }
@@ -146,6 +161,51 @@ async fn main() {
             )
             .await
         }
+        Commands::Upload {
+            id,
+            local_path,
+            remote_path,
+        } => {
+            // Early-return: prints its own result (JSON echo or human
+            // summary), so it must not also flow through `print_result`.
+            match upload_file(&client, &cli.base_url, &id, &local_path, &remote_path).await {
+                Ok(v) => {
+                    if cli.json {
+                        println!("{v}");
+                    } else {
+                        println!("uploaded {} -> {remote_path}", local_path.display());
+                    }
+                    return;
+                }
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        Commands::Download {
+            id,
+            remote_path,
+            local_path,
+        } => {
+            // Early-return: the output is raw bytes, not JSON, so it must
+            // bypass the `print_result` path used by the other commands.
+            match download_file(
+                &client,
+                &cli.base_url,
+                &id,
+                &remote_path,
+                local_path.as_deref(),
+            )
+            .await
+            {
+                Ok(()) => return,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
         Commands::Rm { id } => {
             delete_json(&client, &cli.base_url, &format!("/v1/sandboxes/{id}")).await
         }
@@ -197,6 +257,95 @@ async fn delete_json(
     path: &str,
 ) -> Result<Value, String> {
     send(client.delete(format!("{base_url}{path}"))).await
+}
+
+/// Uploads a local file's raw bytes to a sandbox via multipart/form-data.
+/// Binary-safe — the counterpart to the text-only `write` command.
+async fn upload_file(
+    client: &reqwest::Client,
+    base_url: &str,
+    id: &str,
+    local_path: &Path,
+    remote_path: &str,
+) -> Result<Value, String> {
+    let bytes = std::fs::read(local_path)
+        .map_err(|e| format!("failed to read {}: {e}", local_path.display()))?;
+    let form = reqwest::multipart::Form::new()
+        .text("path", remote_path.to_string())
+        .part(
+            "file",
+            reqwest::multipart::Part::bytes(bytes).file_name(remote_path.to_string()),
+        );
+    let response = client
+        .post(format!("{base_url}/v1/sandboxes/{id}/files/upload"))
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|e| format!("connection error: {e}"))?;
+    let status = response.status();
+    let value: Value = response
+        .json()
+        .await
+        .map_err(|e| format!("invalid response body: {e}"))?;
+    if !status.is_success() {
+        return Err(value
+            .get("error")
+            .and_then(|e| e.get("message"))
+            .and_then(|m| m.as_str())
+            .unwrap_or("upload failed")
+            .to_string());
+    }
+    Ok(value)
+}
+
+/// Downloads a file from a sandbox as raw bytes. With `local_path`, writes
+/// the bytes to that file; without it, writes them to stdout (binary-safe).
+async fn download_file(
+    client: &reqwest::Client,
+    base_url: &str,
+    id: &str,
+    remote_path: &str,
+    local_path: Option<&Path>,
+) -> Result<(), String> {
+    let response = client
+        .get(format!("{base_url}/v1/sandboxes/{id}/files/download"))
+        .query(&[("path", remote_path)])
+        .send()
+        .await
+        .map_err(|e| format!("connection error: {e}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        // Errors come back as the standard JSON envelope, not octet-stream.
+        let value: Value = response
+            .json()
+            .await
+            .map_err(|e| format!("invalid response body: {e}"))?;
+        return Err(value
+            .get("error")
+            .and_then(|e| e.get("message"))
+            .and_then(|m| m.as_str())
+            .unwrap_or("download failed")
+            .to_string());
+    }
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|e| format!("failed to read response body: {e}"))?;
+
+    match local_path {
+        Some(path) => std::fs::write(path, &bytes)
+            .map_err(|e| format!("failed to write {}: {e}", path.display()))?,
+        None => {
+            let mut stdout = std::io::stdout();
+            stdout
+                .write_all(&bytes)
+                .map_err(|e| format!("failed to write to stdout: {e}"))?;
+            stdout
+                .flush()
+                .map_err(|e| format!("failed to flush stdout: {e}"))?;
+        }
+    }
+    Ok(())
 }
 
 async fn send(builder: reqwest::RequestBuilder) -> Result<Value, String> {
@@ -294,9 +443,7 @@ async fn run_exec_stream(
                 done.get("timed_out")
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
-                done.get("duration_ms")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0),
+                done.get("duration_ms").and_then(Value::as_u64).unwrap_or(0),
             );
         }
     }

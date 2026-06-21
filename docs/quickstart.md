@@ -95,3 +95,21 @@ lightsandbox exec sbx_xxxxxxxxxxxx "python main.py"
 lightsandbox read sbx_xxxxxxxxxxxx main.py
 lightsandbox rm sbx_xxxxxxxxxxxx
 ```
+
+## Binary files (images, archives, blobs)
+
+`write_file`/`read_file` (SDK) and `write`/`read` (CLI) are **text-only** —
+they round-trip through JSON, so they can't represent arbitrary bytes. For
+non-text payloads use the binary endpoints instead:
+
+```python
+with client.create(ttl_seconds=300) as sbx:
+    sbx.upload("photo.bin", open("./photo.bin", "rb").read())
+    blob = sbx.download("photo.bin")   # raw bytes, byte-identical to the input
+```
+
+```bash
+lightsandbox upload sbx_xxxxxxxxxxxx ./photo.bin photo.bin
+lightsandbox download sbx_xxxxxxxxxxxx photo.bin ./photo.copy.bin   # to a file
+lightsandbox download sbx_xxxxxxxxxxxx photo.bin > photo.copy.bin   # to stdout
+```

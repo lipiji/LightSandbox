@@ -75,6 +75,14 @@ class Sandbox:
         data = self._client.read_file(self.id, path)
         return data["content"]
 
+    def upload(self, path: str, data: bytes) -> None:
+        """Binary-safe `write_file`: uploads raw bytes via multipart."""
+        self._client.upload_bytes(self.id, path, data)
+
+    def download(self, path: str) -> bytes:
+        """Binary-safe `read_file`: returns the exact stored bytes."""
+        return self._client.download_bytes(self.id, path)
+
     def remove(self) -> None:
         self._client.remove(self.id)
 

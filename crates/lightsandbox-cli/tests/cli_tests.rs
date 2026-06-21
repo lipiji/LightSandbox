@@ -123,6 +123,18 @@ fn cli(base_url: &str, args: &[&str]) -> (i32, Value) {
     (output.status.code().unwrap_or(-1), value)
 }
 
+/// Like `cli`, but returns the raw stdout bytes without JSON parsing — for
+/// `download` (to stdout), whose output is an opaque octet-stream.
+fn cli_raw(base_url: &str, args: &[&str]) -> (i32, Vec<u8>) {
+    let output = Command::new(env!("CARGO_BIN_EXE_lightsandbox"))
+        .arg("--base-url")
+        .arg(base_url)
+        .args(args)
+        .output()
+        .expect("failed to run lightsandbox CLI binary");
+    (output.status.code().unwrap_or(-1), output.stdout)
+}
+
 #[test]
 fn create_list_round_trip() {
     let (base_url, _dir) = start_server();
@@ -216,4 +228,45 @@ fn exec_on_unknown_sandbox_fails_with_nonzero_exit() {
     let (base_url, _dir) = start_server();
     let (code, _) = cli(&base_url, &["exec", "sbx_doesnotexist", "echo hi"]);
     assert_ne!(code, 0);
+}
+
+#[test]
+fn upload_download_round_trip_is_binary_safe() {
+    // `upload`/`download` must move a file with non-UTF-8 bytes losslessly —
+    // the JSON-text `write`/`read` commands cannot represent these bytes, so
+    // this is the exact gap the binary commands exist to fill.
+    let (base_url, _dir) = start_server();
+    let (_, created) = cli(&base_url, &["create", "--ttl-seconds", "120"]);
+    let id = created["id"].as_str().unwrap().to_string();
+
+    // NUL, 0xFF, 0xFE, stray continuation bytes — all invalid as UTF-8.
+    let payload = [0x00u8, 0xFF, 0xFE, 0x80, 0x01, 0x02, 0xC3, 0x28, 0xFF, 0x00];
+    let mut local = tempfile::NamedTempFile::new().unwrap();
+    std::io::Write::write_all(&mut local, &payload).unwrap();
+    let local_path = local.path().to_str().unwrap().to_string();
+
+    let (code, _) = cli(&base_url, &["upload", &id, &local_path, "blob.bin"]);
+    assert_eq!(code, 0, "upload should succeed");
+
+    // File-to-file download: bytes must match exactly.
+    let downloaded = tempfile::NamedTempFile::new().unwrap();
+    let downloaded_path = downloaded.path().to_str().unwrap().to_string();
+    // NamedTempFile creates the file; remove it so the CLI writes a fresh one
+    // (otherwise we'd be comparing against its initial empty contents).
+    std::fs::remove_file(&downloaded_path).unwrap();
+    let (code, _) = cli(&base_url, &["download", &id, "blob.bin", &downloaded_path]);
+    assert_eq!(code, 0, "download to file should succeed");
+    let got = std::fs::read(&downloaded_path).unwrap();
+    assert_eq!(got, payload, "downloaded file must be byte-identical");
+
+    // Download-to-stdout: raw bytes, no JSON wrapping.
+    let (code, stdout_bytes) = cli_raw(&base_url, &["download", &id, "blob.bin"]);
+    assert_eq!(code, 0);
+    assert_eq!(
+        stdout_bytes, payload,
+        "download to stdout must be byte-identical"
+    );
+
+    let (code, _) = cli(&base_url, &["rm", &id]);
+    assert_eq!(code, 0);
 }
