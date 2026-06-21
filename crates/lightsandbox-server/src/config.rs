@@ -81,6 +81,7 @@ impl AppConfig {
             allow_absolute_paths: self.security.allow_absolute_paths,
             allow_path_traversal: self.security.allow_path_traversal,
             hide_host_paths: self.security.hide_host_paths,
+            remove_expired: self.gc.remove_expired,
         }
     }
 }

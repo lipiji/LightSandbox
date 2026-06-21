@@ -122,6 +122,7 @@ pub struct RuntimeConfig {
     pub allow_absolute_paths: bool,
     pub allow_path_traversal: bool,
     pub hide_host_paths: bool,
+    pub remove_expired: bool,
 }
 
 impl Default for RuntimeConfig {
@@ -132,6 +133,7 @@ impl Default for RuntimeConfig {
             allow_absolute_paths: false,
             allow_path_traversal: false,
             hide_host_paths: true,
+            remove_expired: true,
         }
     }
 }

@@ -32,6 +32,7 @@ fn test_app() -> axum::Router {
         allow_absolute_paths: false,
         allow_path_traversal: false,
         hide_host_paths: true,
+        remove_expired: true,
     };
     let runtime = Arc::new(LocalProcessRuntime::new(config));
     let state = Arc::new(AppState { runtime });

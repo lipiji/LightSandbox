@@ -13,8 +13,8 @@ pub fn spawn(state: Arc<AppState>, interval_seconds: u64, enabled: bool) {
         loop {
             interval.tick().await;
             match state.runtime.cleanup_expired().await {
-                Ok(removed) if removed > 0 => {
-                    tracing::info!(removed, "GC removed expired sandboxes");
+                Ok(processed) if processed > 0 => {
+                    tracing::info!(processed, "GC processed expired sandboxes");
                 }
                 Ok(_) => {}
                 Err(e) => tracing::warn!(error = %e, "GC cleanup failed"),

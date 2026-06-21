@@ -5,11 +5,13 @@ use lightsandbox_core::LightSandboxError;
 /// Resolves a client-supplied path against a sandbox's workspace root,
 /// rejecting traversal (`..`) and (unless explicitly allowed) absolute paths.
 /// Built by manually walking path components rather than `Path::join`, so an
-/// attacker-controlled string can never escape `workspace_root`.
+/// attacker-controlled string can never escape `workspace_root` unless the
+/// caller explicitly opts into `allow_traversal`.
 pub fn safe_path(
     workspace_root: &Path,
     requested: &str,
     allow_absolute: bool,
+    allow_traversal: bool,
 ) -> Result<PathBuf, LightSandboxError> {
     if requested.trim().is_empty() {
         return Err(LightSandboxError::InvalidPath(
@@ -42,6 +44,10 @@ pub fn safe_path(
             continue;
         }
         if component == ".." {
+            if allow_traversal {
+                result.push("..");
+                continue;
+            }
             return Err(LightSandboxError::InvalidPath(
                 "path traversal is not allowed".into(),
             ));
@@ -58,21 +64,28 @@ mod tests {
     #[test]
     fn rejects_parent_traversal() {
         let root = PathBuf::from("/workspace/sbx_1");
-        assert!(safe_path(&root, "../escape.txt", false).is_err());
-        assert!(safe_path(&root, "a/../../escape.txt", false).is_err());
+        assert!(safe_path(&root, "../escape.txt", false, false).is_err());
+        assert!(safe_path(&root, "a/../../escape.txt", false, false).is_err());
     }
 
     #[test]
     fn rejects_absolute_by_default() {
         let root = PathBuf::from("/workspace/sbx_1");
-        assert!(safe_path(&root, "/etc/passwd", false).is_err());
-        assert!(safe_path(&root, "C:\\Windows\\System32", false).is_err());
+        assert!(safe_path(&root, "/etc/passwd", false, false).is_err());
+        assert!(safe_path(&root, "C:\\Windows\\System32", false, false).is_err());
     }
 
     #[test]
     fn allows_nested_relative_path() {
         let root = PathBuf::from("/workspace/sbx_1");
-        let resolved = safe_path(&root, "a/b/c.txt", false).unwrap();
+        let resolved = safe_path(&root, "a/b/c.txt", false, false).unwrap();
         assert_eq!(resolved, root.join("a").join("b").join("c.txt"));
+    }
+
+    #[test]
+    fn allows_traversal_when_explicitly_enabled() {
+        let root = PathBuf::from("/workspace/sbx_1");
+        let resolved = safe_path(&root, "../escape.txt", false, true).unwrap();
+        assert_eq!(resolved, root.join("..").join("escape.txt"));
     }
 }

@@ -19,6 +19,7 @@ fn test_runtime(root: &std::path::Path) -> LocalProcessRuntime {
         allow_absolute_paths: false,
         allow_path_traversal: false,
         hide_host_paths: true,
+        remove_expired: true,
     };
     LocalProcessRuntime::new(config)
 }
