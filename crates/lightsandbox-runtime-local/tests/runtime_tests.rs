@@ -30,8 +30,9 @@ fn test_runtime(root: &std::path::Path) -> LocalProcessRuntime {
         templates_dir: None,
         pool_enabled: false,
         pool_min_idle: 0,
+        persistence_db_path: None,
     };
-    LocalProcessRuntime::new(config)
+    LocalProcessRuntime::new(config).expect("test runtime builds")
 }
 
 fn temp_dir(name: &str) -> std::path::PathBuf {
@@ -454,8 +455,9 @@ fn runtime_with_templates(
         templates_dir: Some(templates_dir),
         pool_enabled: false,
         pool_min_idle: 0,
+        persistence_db_path: None,
     };
-    LocalProcessRuntime::new(config)
+    LocalProcessRuntime::new(config).expect("test runtime builds")
 }
 
 #[tokio::test]
@@ -523,8 +525,9 @@ async fn pool_reuses_idle_slots_and_stays_consistent() {
         templates_dir: None,
         pool_enabled: true,
         pool_min_idle: 2,
+        persistence_db_path: None,
     };
-    let rt = LocalProcessRuntime::new(config);
+    let rt = LocalProcessRuntime::new(config).expect("test runtime builds");
     rt.prewarm().await;
 
     // Several template-less creates: each reuses a pooled slot when one is
@@ -547,4 +550,133 @@ async fn pool_reuses_idle_slots_and_stays_consistent() {
 
     let snap = rt.metrics().await.unwrap();
     assert_eq!(snap.sandboxes_created_total, 5);
+}
+
+// --- persistence (restart-survival) ---
+
+/// Builds a runtime whose metadata is mirrored to `db_path`. Reusing the same
+/// `root` and `db_path` across two runtimes simulates a process restart:
+/// runtime B's `new()` reopens the db and repopulates its in-memory state.
+fn persistent_runtime(root: &std::path::Path, db_path: &std::path::Path) -> LocalProcessRuntime {
+    let config = RuntimeConfig {
+        workspace_root: root.to_path_buf(),
+        limits: test_limits(),
+        allow_absolute_paths: false,
+        allow_path_traversal: false,
+        hide_host_paths: true,
+        remove_expired: true,
+        templates_dir: None,
+        pool_enabled: false,
+        pool_min_idle: 0,
+        persistence_db_path: Some(db_path.to_path_buf()),
+    };
+    LocalProcessRuntime::new(config).expect("persistent test runtime builds")
+}
+
+#[tokio::test]
+async fn persistence_restores_sandbox_after_restart() {
+    let root = temp_dir("persist_restore");
+    let db_path = root.join("lightsandbox.redb");
+
+    // Runtime A: create two sandboxes (one with env + metadata so we can
+    // verify those round-trip too), then drop A to simulate a stop.
+    let info_a = {
+        let rt = persistent_runtime(&root, &db_path);
+        let plain = rt.create(SandboxSpec::default()).await.unwrap();
+        let rich = rt
+            .create(SandboxSpec {
+                ttl_seconds: Some(3600),
+                metadata: Some([("owner".to_string(), "alice".to_string())].into()),
+                env: Some([("FOO".to_string(), "bar".to_string())].into()),
+                template: None,
+            })
+            .await
+            .unwrap();
+        (plain.id, rich.id)
+    };
+    // A is dropped here — only its on-disk metadata + workspace dirs remain.
+
+    // Runtime B: same root + db. The two sandboxes must reappear.
+    let rt = persistent_runtime(&root, &db_path);
+    let listed = rt.list().await.unwrap();
+    assert_eq!(listed.len(), 2, "both sandboxes should be restored");
+    assert!(listed.iter().any(|s| s.id == info_a.0));
+    assert!(listed.iter().any(|s| s.id == info_a.1));
+
+    // The restored rich sandbox is fully usable: exec runs in its workspace,
+    // and the persisted env is applied. (Shell var syntax differs by OS:
+    // cmd.exe expands %FOO%, sh expands $FOO.)
+    #[cfg(windows)]
+    let echo_env = "echo %FOO%";
+    #[cfg(not(windows))]
+    let echo_env = "echo $FOO";
+    let result = rt
+        .exec(
+            &info_a.1,
+            ExecRequest {
+                cmd: echo_env.to_string(),
+                timeout_seconds: None,
+                env: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.exit_code, 0);
+    assert_eq!(
+        result.stdout.trim(),
+        "bar",
+        "persisted env should be applied to restored sandbox"
+    );
+}
+
+#[tokio::test]
+async fn persistence_skips_already_expired_sandbox() {
+    let root = temp_dir("persist_expired");
+    let db_path = root.join("lightsandbox.redb");
+
+    // Create a sandbox with ttl=0, then drop the runtime before GC runs.
+    // On restart it must be treated as already expired (dropped, not
+    // restored), and its workspace dir cleaned up.
+    let id = {
+        let rt = persistent_runtime(&root, &db_path);
+        let info = rt
+            .create(SandboxSpec {
+                ttl_seconds: Some(0),
+                metadata: None,
+                env: None,
+                template: None,
+            })
+            .await
+            .unwrap();
+        // Give the ttl=0 expiry a chance to actually elapse.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        info.id
+    };
+
+    let rt = persistent_runtime(&root, &db_path);
+    let listed = rt.list().await.unwrap();
+    assert!(
+        !listed.iter().any(|s| s.id == id),
+        "an already-expired sandbox must not be restored"
+    );
+}
+
+#[tokio::test]
+async fn persistence_removed_sandbox_is_gone_after_restart() {
+    let root = temp_dir("persist_removed");
+    let db_path = root.join("lightsandbox.redb");
+
+    let (kept, removed) = {
+        let rt = persistent_runtime(&root, &db_path);
+        let kept = rt.create(SandboxSpec::default()).await.unwrap();
+        let removed = rt.create(SandboxSpec::default()).await.unwrap();
+        rt.remove(&removed.id).await.unwrap();
+        (kept.id, removed.id)
+    };
+
+    let rt = persistent_runtime(&root, &db_path);
+    let listed = rt.list().await.unwrap();
+    assert_eq!(listed.len(), 1, "only the non-removed sandbox survives");
+    assert!(listed.iter().any(|s| s.id == kept));
+    assert!(!listed.iter().any(|s| s.id == removed));
 }

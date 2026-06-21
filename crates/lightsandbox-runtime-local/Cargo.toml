@@ -8,11 +8,13 @@ license.workspace = true
 lightsandbox-core = { path = "../lightsandbox-core" }
 tokio.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 chrono.workspace = true
 async-trait.workspace = true
 uuid.workspace = true
 dashmap.workspace = true
 tracing.workspace = true
+redb = "4"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

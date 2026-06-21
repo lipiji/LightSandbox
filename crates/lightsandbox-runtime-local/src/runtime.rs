@@ -19,6 +19,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::metrics_collector::MetricsCollector;
 use crate::paths::safe_path;
+use crate::persistence::{MetadataStore, PersistedSandbox};
 
 struct SandboxEntry {
     info: SandboxInfo,
@@ -47,13 +48,22 @@ pub struct LocalProcessRuntime {
     idle_slots: Arc<Mutex<Vec<IdleSlot>>>,
     /// Number of replenish tasks currently in flight, used to bound spawns.
     replenish_in_flight: Arc<AtomicUsize>,
+    /// `None` unless `RuntimeConfig::persistence_db_path` is set. Used as a
+    /// best-effort write-through store so sandbox metadata can be restored on
+    /// the next startup; never consulted while the server is running.
+    persistence: Option<Arc<MetadataStore>>,
 }
 
 impl LocalProcessRuntime {
-    pub fn new(config: RuntimeConfig) -> Self {
+    pub fn new(config: RuntimeConfig) -> Result<Self, LightSandboxError> {
         let exec_semaphore = Arc::new(Semaphore::new(config.limits.max_concurrent_exec.max(1)));
         let sandbox_semaphore = Arc::new(Semaphore::new(config.limits.max_sandboxes.max(1)));
-        Self {
+        let persistence = match &config.persistence_db_path {
+            Some(path) => Some(Arc::new(MetadataStore::open(path)?)),
+            None => None,
+        };
+
+        let runtime = Self {
             config,
             sandboxes: DashMap::new(),
             exec_semaphore,
@@ -61,6 +71,88 @@ impl LocalProcessRuntime {
             metrics: Arc::new(MetricsCollector::new()),
             idle_slots: Arc::new(Mutex::new(Vec::new())),
             replenish_in_flight: Arc::new(AtomicUsize::new(0)),
+            persistence,
+        };
+        runtime.restore_from_persistence();
+        Ok(runtime)
+    }
+
+    /// Repopulates `self.sandboxes` from the persistence DB at startup, if
+    /// configured. Already-expired rows are dropped (treated as if GC had
+    /// already run); rows whose workspace dir is missing on disk are dropped
+    /// as orphaned; rows that can't reacquire a `max_sandboxes` permit
+    /// (capacity lowered since the last run) are skipped with a warning,
+    /// left in the DB in case a future restart has more headroom.
+    fn restore_from_persistence(&self) {
+        let Some(persistence) = &self.persistence else {
+            return;
+        };
+        let persisted = match persistence.load_all() {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::error!(error = %e, "failed to load persisted sandboxes; starting empty");
+                return;
+            }
+        };
+
+        let now = Utc::now();
+        let mut restored = 0usize;
+        for PersistedSandbox { info, env } in persisted {
+            let workspace_path = self.workspace_dir(&info.id);
+
+            if info.expires_at.map(|exp| exp <= now).unwrap_or(false) {
+                if workspace_path.exists() {
+                    let _ = std::fs::remove_dir_all(&workspace_path);
+                }
+                self.persist_delete(&info.id);
+                continue;
+            }
+
+            if !workspace_path.exists() {
+                tracing::warn!(id = %info.id, "dropping persisted sandbox with missing workspace dir");
+                self.persist_delete(&info.id);
+                continue;
+            }
+
+            let permit = match self.sandbox_semaphore.clone().try_acquire_owned() {
+                Ok(permit) => permit,
+                Err(_) => {
+                    tracing::warn!(
+                        id = %info.id,
+                        "skipping persisted sandbox restore: max_sandboxes capacity reached"
+                    );
+                    continue;
+                }
+            };
+
+            self.sandboxes.insert(
+                info.id.clone(),
+                SandboxEntry {
+                    info,
+                    env,
+                    _permit: permit,
+                },
+            );
+            restored += 1;
+        }
+        if restored > 0 {
+            tracing::info!(restored, "restored persisted sandboxes");
+        }
+    }
+
+    fn persist_upsert(&self, info: &SandboxInfo, env: &HashMap<String, String>) {
+        if let Some(p) = &self.persistence {
+            if let Err(e) = p.upsert(info, env) {
+                tracing::warn!(error = %e, id = %info.id, "failed to persist sandbox metadata");
+            }
+        }
+    }
+
+    fn persist_delete(&self, id: &str) {
+        if let Some(p) = &self.persistence {
+            if let Err(e) = p.delete(id) {
+                tracing::warn!(error = %e, id, "failed to delete persisted sandbox row");
+            }
         }
     }
 
@@ -286,8 +378,11 @@ where
 /// instead of buffering. Stops early if the receiver is gone (client
 /// disconnected); the caller's overall exec timeout remains the backstop
 /// that prevents the child from blocking forever on an undrained pipe.
-async fn pump_reader<R>(mut reader: R, tx: Sender<ExecOutputEvent>, wrap: fn(Vec<u8>) -> ExecOutputEvent)
-where
+async fn pump_reader<R>(
+    mut reader: R,
+    tx: Sender<ExecOutputEvent>,
+    wrap: fn(Vec<u8>) -> ExecOutputEvent,
+) where
     R: tokio::io::AsyncRead + Unpin,
 {
     let mut buf = [0u8; 8192];
@@ -381,16 +476,18 @@ impl SandboxRuntime for LocalProcessRuntime {
             metadata: spec.metadata.unwrap_or_default(),
         };
 
+        let env = spec.env.unwrap_or_default();
         self.sandboxes.insert(
             id.to_string(),
             SandboxEntry {
                 info: info.clone(),
-                env: spec.env.unwrap_or_default(),
+                env: env.clone(),
                 _permit: permit,
             },
         );
 
         self.metrics.record_create();
+        self.persist_upsert(&info, &env);
 
         // Lazily refill the pool if this create drained it.
         if self.config.pool_enabled {
@@ -632,9 +729,13 @@ impl SandboxRuntime for LocalProcessRuntime {
         id: &str,
         ttl_seconds: u64,
     ) -> Result<SandboxInfo, LightSandboxError> {
-        let mut entry = self.get_active_mut(id)?;
-        entry.info.expires_at = Some(Utc::now() + ChronoDuration::seconds(ttl_seconds as i64));
-        Ok(entry.info.clone())
+        let (info, env) = {
+            let mut entry = self.get_active_mut(id)?;
+            entry.info.expires_at = Some(Utc::now() + ChronoDuration::seconds(ttl_seconds as i64));
+            (entry.info.clone(), entry.env.clone())
+        };
+        self.persist_upsert(&info, &env);
+        Ok(info)
     }
 
     async fn remove(&self, id: &str) -> Result<(), LightSandboxError> {
@@ -649,6 +750,7 @@ impl SandboxRuntime for LocalProcessRuntime {
         }
         self.sandboxes.remove(id);
         self.metrics.record_remove();
+        self.persist_delete(id);
         Ok(())
     }
 
@@ -675,9 +777,16 @@ impl SandboxRuntime for LocalProcessRuntime {
                 if self.sandboxes.remove(&id).is_some() {
                     processed += 1;
                 }
-            } else if let Some(mut entry) = self.sandboxes.get_mut(&id) {
-                entry.info.status = SandboxStatus::Expired;
-                processed += 1;
+                self.persist_delete(&id);
+            } else {
+                let persisted = self.sandboxes.get_mut(&id).map(|mut entry| {
+                    entry.info.status = SandboxStatus::Expired;
+                    (entry.info.clone(), entry.env.clone())
+                });
+                if let Some((info, env)) = persisted {
+                    processed += 1;
+                    self.persist_upsert(&info, &env);
+                }
             }
         }
         self.metrics.record_gc_removed(processed as u64);

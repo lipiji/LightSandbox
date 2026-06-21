@@ -53,7 +53,8 @@ async fn main() {
         ..RuntimeConfig::default()
     };
 
-    let runtime = Arc::new(LocalProcessRuntime::new(config));
+    let runtime =
+        Arc::new(LocalProcessRuntime::new(config).expect("failed to build local runtime"));
     let pipeline_limit = Arc::new(Semaphore::new(args.concurrency));
 
     let succeeded = Arc::new(AtomicUsize::new(0));

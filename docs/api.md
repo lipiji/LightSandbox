@@ -255,3 +255,30 @@ and exempt from TTL/GC until handed out. It is **off by default**:
 `LocalProcessRuntime` creates are already microsecond-scale, so this mainly
 reserves the interface for future runtimes (Docker/Firecracker) where
 cold-start cost is real.
+
+## Persistence (optional)
+
+`[persistence] enabled = true, path = "./data/lightsandbox.redb"` mirrors
+sandbox **metadata** — id, status, created/expires timestamps, env, and the
+user-supplied `metadata` map — to a single `redb` database file on every
+change, and restores it on the next startup. With it on, sandboxes whose TTL
+has not yet elapsed survive a server restart (their workspace file contents
+are already on disk; only the id→directory mapping is persisted). It is
+**off by default**, so out of the box sandbox state is purely in-memory and
+lost when the server stops, exactly as in v0.1.
+
+Semantics worth knowing:
+
+- **Write-through, best-effort.** The in-memory state is authoritative while
+  the server runs; the store is consulted only once, at startup. A persistence
+  write failure is logged and swallowed — it never fails the API operation
+  that triggered it.
+- **Reconciliation on startup.** Already-expired rows are dropped (and their
+  workspace dir cleaned up) as if GC had run. Rows whose workspace directory
+  no longer exists on disk are dropped as orphaned. Rows that cannot reclaim
+  a `max_sandboxes` slot (e.g. capacity was lowered since the last run) are
+  skipped with a warning but left on disk, so a later restart with more
+  headroom can still restore them.
+- **`redb`, not SQLite.** Chosen specifically to keep the build pure-Rust:
+  `libsqlite3-sys` needs a C compiler to build, which this project does not
+  require.

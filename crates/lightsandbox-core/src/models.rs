@@ -150,6 +150,10 @@ pub struct RuntimeConfig {
     pub pool_enabled: bool,
     /// Target number of idle slots the pool tries to maintain.
     pub pool_min_idle: usize,
+    /// Path to a SQLite database file used to persist sandbox metadata across
+    /// restarts. `None` (the default) means no persistence: sandbox state is
+    /// purely in-memory, as in v0.1.
+    pub persistence_db_path: Option<std::path::PathBuf>,
 }
 
 impl Default for RuntimeConfig {
@@ -164,6 +168,7 @@ impl Default for RuntimeConfig {
             templates_dir: None,
             pool_enabled: false,
             pool_min_idle: 0,
+            persistence_db_path: None,
         }
     }
 }

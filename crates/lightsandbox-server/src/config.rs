@@ -54,6 +54,23 @@ pub struct PoolSection {
     pub min_idle: usize,
 }
 
+/// Opt-in sandbox-metadata persistence across restarts. Off by default so
+/// v0.1's zero-database guarantee still holds unless an operator sets
+/// `enabled = true`. When enabled, sandbox metadata is mirrored to a `redb`
+/// file at `path` and restored on the next startup.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct PersistenceSection {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Path to the `redb` database file. Only consulted when `enabled = true`.
+    #[serde(default = "default_persistence_path")]
+    pub path: String,
+}
+
+fn default_persistence_path() -> String {
+    "data/lightsandbox.redb".to_string()
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct AppConfig {
     pub server: ServerSection,
@@ -65,6 +82,8 @@ pub struct AppConfig {
     pub templates: TemplatesSection,
     #[serde(default)]
     pub pool: PoolSection,
+    #[serde(default)]
+    pub persistence: PersistenceSection,
 }
 
 impl AppConfig {
@@ -98,9 +117,14 @@ impl AppConfig {
             allow_path_traversal: self.security.allow_path_traversal,
             hide_host_paths: self.security.hide_host_paths,
             remove_expired: self.gc.remove_expired,
-            templates_dir: self.templates.dir.as_ref().map(|s| PathBuf::from(s)),
+            templates_dir: self.templates.dir.as_ref().map(PathBuf::from),
             pool_enabled: self.pool.enabled,
             pool_min_idle: self.pool.min_idle,
+            persistence_db_path: if self.persistence.enabled {
+                Some(PathBuf::from(&self.persistence.path))
+            } else {
+                None
+            },
         }
     }
 }

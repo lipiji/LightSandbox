@@ -20,7 +20,7 @@ pub async fn run(config_path: &Path) -> Result<(), LightSandboxError> {
 
     // Build the concrete runtime so we can prewarm the pool (a
     // LocalProcessRuntime-specific concern) before erasing to the trait object.
-    let runtime = LocalProcessRuntime::new(app_config.runtime_config());
+    let runtime = LocalProcessRuntime::new(app_config.runtime_config())?;
     if app_config.pool.enabled {
         runtime.prewarm().await;
     }

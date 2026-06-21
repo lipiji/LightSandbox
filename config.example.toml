@@ -39,3 +39,15 @@ dir = "./data/templates"
 # workspace dirs are pre-created and handed out to template-less creates.
 enabled = false
 min_idle = 5
+
+[persistence]
+# Opt-in sandbox-metadata durability across restarts. Off by default: with
+# `enabled = false`, sandbox state is purely in-memory and lost when the
+# server stops, exactly as in v0.1. When enabled, sandbox metadata (id,
+# status, ttl, env, metadata) is mirrored to a pure-Rust `redb` database file
+# at `path` on every change and restored on the next startup, so sandboxes
+# whose TTL has not elapsed survive a restart. Workspace file contents on
+# disk are already durable; this only persists the *metadata* that maps ids to
+# those directories.
+enabled = false
+path = "./data/lightsandbox.redb"

@@ -30,6 +30,7 @@ fn test_config(workspace_root: PathBuf) -> RuntimeConfig {
         templates_dir: None,
         pool_enabled: false,
         pool_min_idle: 0,
+        persistence_db_path: None,
     }
 }
 
@@ -44,7 +45,9 @@ fn unique_dir(prefix: &str) -> PathBuf {
 }
 
 fn test_app() -> axum::Router {
-    let runtime = Arc::new(LocalProcessRuntime::new(test_config(unique_dir("e2b_test"))));
+    let runtime = Arc::new(
+        LocalProcessRuntime::new(test_config(unique_dir("e2b_test"))).expect("test runtime builds"),
+    );
     let state = Arc::new(AppState { runtime });
     api::router(state)
 }
