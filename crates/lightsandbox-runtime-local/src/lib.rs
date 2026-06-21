@@ -1,3 +1,4 @@
+mod metrics_collector;
 mod paths;
 mod runtime;
 

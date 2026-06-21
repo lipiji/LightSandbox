@@ -8,13 +8,14 @@ use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
 use dashmap::DashMap;
 use lightsandbox_core::{
-    ExecRequest, ExecResult, LightSandboxError, RuntimeConfig, SandboxInfo, SandboxRuntime,
-    SandboxSpec, SandboxStatus,
+    ExecRequest, ExecResult, LightSandboxError, MetricsSnapshot, RuntimeConfig, SandboxInfo,
+    SandboxRuntime, SandboxSpec, SandboxStatus,
 };
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
+use crate::metrics_collector::MetricsCollector;
 use crate::paths::safe_path;
 
 struct SandboxEntry {
@@ -30,6 +31,7 @@ pub struct LocalProcessRuntime {
     sandboxes: DashMap<String, SandboxEntry>,
     exec_semaphore: Arc<Semaphore>,
     sandbox_semaphore: Arc<Semaphore>,
+    metrics: Arc<MetricsCollector>,
 }
 
 impl LocalProcessRuntime {
@@ -41,6 +43,7 @@ impl LocalProcessRuntime {
             sandboxes: DashMap::new(),
             exec_semaphore,
             sandbox_semaphore,
+            metrics: Arc::new(MetricsCollector::new()),
         }
     }
 
@@ -180,6 +183,7 @@ impl SandboxRuntime for LocalProcessRuntime {
             },
         );
 
+        self.metrics.record_create();
         Ok(info)
     }
 
@@ -245,6 +249,8 @@ impl SandboxRuntime for LocalProcessRuntime {
         match tokio::time::timeout(timeout_dur, output_fut).await {
             Ok((stdout_bytes, stderr_bytes, Ok(status))) => {
                 let duration_ms = start.elapsed().as_millis();
+                self.metrics
+                    .record_exec(duration_ms.try_into().unwrap_or(u64::MAX), false);
                 Ok(ExecResult {
                     exit_code: status.code().unwrap_or(-1),
                     stdout: String::from_utf8_lossy(&stdout_bytes).into_owned(),
@@ -256,11 +262,14 @@ impl SandboxRuntime for LocalProcessRuntime {
             Ok((_, _, Err(e))) => Err(LightSandboxError::ExecFailed(e.to_string())),
             Err(_elapsed) => {
                 kill_process_tree(pid).await;
+                let duration_ms = start.elapsed().as_millis();
+                self.metrics
+                    .record_exec(duration_ms.try_into().unwrap_or(u64::MAX), true);
                 Ok(ExecResult {
                     exit_code: -1,
                     stdout: String::new(),
                     stderr: String::new(),
-                    duration_ms: start.elapsed().as_millis(),
+                    duration_ms,
                     timed_out: true,
                 })
             }
@@ -297,6 +306,7 @@ impl SandboxRuntime for LocalProcessRuntime {
         tokio::fs::write(&target, content)
             .await
             .map_err(|e| self.io_error("writing file", e))?;
+        self.metrics.record_file_write();
         Ok(())
     }
 
@@ -320,9 +330,11 @@ impl SandboxRuntime for LocalProcessRuntime {
             return Err(LightSandboxError::OutputTooLarge);
         }
 
-        tokio::fs::read(&target)
+        let bytes = tokio::fs::read(&target)
             .await
-            .map_err(|e| self.io_error("reading file", e))
+            .map_err(|e| self.io_error("reading file", e))?;
+        self.metrics.record_file_read();
+        Ok(bytes)
     }
 
     async fn remove(&self, id: &str) -> Result<(), LightSandboxError> {
@@ -336,10 +348,12 @@ impl SandboxRuntime for LocalProcessRuntime {
                 .map_err(|e| self.io_error("removing workspace", e))?;
         }
         self.sandboxes.remove(id);
+        self.metrics.record_remove();
         Ok(())
     }
 
     async fn cleanup_expired(&self) -> Result<usize, LightSandboxError> {
+        self.metrics.record_gc_run();
         let now = Utc::now();
         let expired_ids: Vec<String> = self
             .sandboxes
@@ -366,6 +380,11 @@ impl SandboxRuntime for LocalProcessRuntime {
                 processed += 1;
             }
         }
+        self.metrics.record_gc_removed(processed as u64);
         Ok(processed)
+    }
+
+    async fn metrics(&self) -> Result<MetricsSnapshot, LightSandboxError> {
+        Ok(self.metrics.snapshot(self.sandboxes.len() as u64))
     }
 }

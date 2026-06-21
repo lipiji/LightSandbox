@@ -6,7 +6,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use lightsandbox_core::{
-    ExecRequest, FileReadResponse, FileWriteRequest, LightSandboxError, SandboxSpec,
+    format_prometheus, ExecRequest, FileReadResponse, FileWriteRequest, LightSandboxError,
+    SandboxSpec,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -16,6 +17,7 @@ use crate::state::AppState;
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/health", get(health))
+        .route("/metrics", get(metrics))
         .route("/v1/sandboxes", post(create_sandbox).get(list_sandboxes))
         .route("/v1/sandboxes/:id", get(get_sandbox).delete(remove_sandbox))
         .route("/v1/sandboxes/:id/exec", post(exec_sandbox))
@@ -52,6 +54,23 @@ impl IntoResponse for ApiError {
 
 async fn health() -> Json<serde_json::Value> {
     Json(json!({"status": "ok"}))
+}
+
+/// Prometheus exposition endpoint. Returns the runtime's metrics snapshot
+/// formatted as a 0.0.4 text exposition with the standard content type so a
+/// scrape picks it up without extra configuration.
+async fn metrics(State(state): State<Arc<AppState>>) -> Result<Response, ApiError> {
+    let snap = state.runtime.metrics().await?;
+    let body = format_prometheus(&snap);
+    Ok((
+        StatusCode::OK,
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        body,
+    )
+        .into_response())
 }
 
 async fn create_sandbox(

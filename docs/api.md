@@ -22,6 +22,41 @@ Response:
 {"status": "ok"}
 ```
 
+## `GET /metrics`
+
+Prometheus exposition endpoint. Returns runtime counters and gauges as a
+`text/plain; version=0.0.4` body, ready to be scraped by Prometheus (or any
+compatible collector) with no extra configuration.
+
+Exposed series:
+
+| Metric | Type | Meaning |
+|---|---|---|
+| `lightsandbox_sandboxes_created_total` | counter | Sandboxes created since start |
+| `lightsandbox_sandboxes_active` | gauge | Sandboxes currently tracked |
+| `lightsandbox_sandboxes_removed_total` | counter | Sandboxes explicitly removed |
+| `lightsandbox_exec_total` | counter | `exec` calls that completed (incl. timeout) |
+| `lightsandbox_exec_timed_out_total` | counter | `exec` calls that hit their timeout |
+| `lightsandbox_exec_duration_seconds` | histogram | `exec` wall-clock duration |
+| `lightsandbox_gc_runs_total` | counter | `cleanup_expired` invocations |
+| `lightsandbox_gc_removed_total` | counter | Sandboxes reaped by GC |
+| `lightsandbox_file_writes_total` | counter | Successful `write_file` calls |
+| `lightsandbox_file_reads_total` | counter | Successful `read_file` calls |
+
+Example scrape (`curl http://127.0.0.1:8080/metrics`):
+
+```text
+# HELP lightsandbox_exec_total Total exec calls that completed (normally or by timeout).
+# TYPE lightsandbox_exec_total counter
+lightsandbox_exec_total 2
+# HELP lightsandbox_exec_duration_seconds Exec wall-clock duration in seconds.
+# TYPE lightsandbox_exec_duration_seconds histogram
+lightsandbox_exec_duration_seconds_bucket{le="0.05"} 2
+lightsandbox_exec_duration_seconds_bucket{le="+Inf"} 2
+lightsandbox_exec_duration_seconds_sum 0.056
+lightsandbox_exec_duration_seconds_count 2
+```
+
 ## `POST /v1/sandboxes`
 
 Create a sandbox.

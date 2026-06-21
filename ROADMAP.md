@@ -10,14 +10,14 @@
 - File read/write
 - TTL and GC
 - Basic concurrency control
+- Process tree cleanup on timeout (Unix process group / Windows taskkill)
+- Prometheus `/metrics` endpoint
 
 ## v0.2
 - Streaming exec output
 - Sandbox pool (warm pool + reusable templates, in-process — no Kubernetes needed)
 - E2B-compatible API subset (pure API-shape work, no new runtime dependency)
 - SQLite metadata persistence
-- Metrics endpoint
-- Better process tree cleanup
 - File upload/download multipart
 
 ## v0.3

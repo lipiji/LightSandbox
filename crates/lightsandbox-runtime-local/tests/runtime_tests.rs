@@ -248,3 +248,77 @@ async fn concurrent_create_does_not_crash() {
     let listed = rt.list().await.unwrap();
     assert_eq!(listed.len(), 20);
 }
+
+#[tokio::test]
+async fn metrics_reflect_operations() {
+    let root = temp_dir("metrics");
+    let rt = test_runtime(&root);
+
+    // A fresh runtime reports zero counters and an empty (still well-formed)
+    // histogram.
+    let before = rt.metrics().await.unwrap();
+    assert_eq!(before.sandboxes_created_total, 0);
+    assert_eq!(before.sandboxes_active, 0);
+    assert_eq!(before.exec_duration.count, 0);
+
+    let info = rt.create(SandboxSpec::default()).await.unwrap();
+    rt.write_file(&info.id, "a.txt", b"x".to_vec())
+        .await
+        .unwrap();
+    rt.read_file(&info.id, "a.txt").await.unwrap();
+    rt.exec(
+        &info.id,
+        ExecRequest {
+            cmd: echo_cmd("hi"),
+            timeout_seconds: None,
+            env: None,
+        },
+    )
+    .await
+    .unwrap();
+    rt.remove(&info.id).await.unwrap();
+    let after = rt.metrics().await.unwrap();
+
+    assert_eq!(after.sandboxes_created_total, 1);
+    assert_eq!(after.sandboxes_active, 0); // removed
+    assert_eq!(after.sandboxes_removed_total, 1);
+    assert_eq!(after.exec_total, 1);
+    assert_eq!(after.exec_timed_out_total, 0);
+    assert_eq!(after.exec_duration.count, 1);
+    assert!(after.exec_duration.sum_millis < 5_000);
+    // The +Inf bucket must equal the total observation count.
+    assert_eq!(
+        *after.exec_duration.bucket_counts.last().unwrap(),
+        after.exec_duration.count
+    );
+    assert_eq!(after.file_writes_total, 1);
+    assert_eq!(after.file_reads_total, 1);
+}
+
+#[tokio::test]
+async fn metrics_count_exec_timeout_separately() {
+    let root = temp_dir("metrics_timeout");
+    let rt = test_runtime(&root);
+    let info = rt.create(SandboxSpec::default()).await.unwrap();
+    let sleep_cmd = if cfg!(windows) {
+        "ping -n 6 127.0.0.1 > NUL".to_string()
+    } else {
+        "sleep 6".to_string()
+    };
+    let result = rt
+        .exec(
+            &info.id,
+            ExecRequest {
+                cmd: sleep_cmd,
+                timeout_seconds: Some(1),
+                env: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(result.timed_out);
+
+    let snap = rt.metrics().await.unwrap();
+    assert_eq!(snap.exec_total, 1);
+    assert_eq!(snap.exec_timed_out_total, 1);
+}

@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 
 use crate::error::LightSandboxError;
+use crate::metrics::MetricsSnapshot;
 use crate::models::{ExecRequest, ExecResult, SandboxInfo, SandboxSpec};
 
 #[async_trait]
@@ -18,4 +19,8 @@ pub trait SandboxRuntime: Send + Sync {
     async fn read_file(&self, id: &str, path: &str) -> Result<Vec<u8>, LightSandboxError>;
     async fn remove(&self, id: &str) -> Result<(), LightSandboxError>;
     async fn cleanup_expired(&self) -> Result<usize, LightSandboxError>;
+    /// Returns a point-in-time snapshot of runtime-wide counters and gauges
+    /// for observability. Implementations must never fail on a best-effort
+    /// read of their own counters; the `Result` keeps the trait uniform.
+    async fn metrics(&self) -> Result<MetricsSnapshot, LightSandboxError>;
 }
