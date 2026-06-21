@@ -114,10 +114,11 @@ async fn main() {
             .await
         }
         Commands::Read { id, remote_path } => {
-            get_json(
+            get_json_with_query(
                 &client,
                 &cli.base_url,
-                &format!("/v1/sandboxes/{id}/files?path={remote_path}"),
+                &format!("/v1/sandboxes/{id}/files"),
+                &[("path", remote_path.as_str())],
             )
             .await
         }
@@ -155,6 +156,15 @@ async fn put_json(
 
 async fn get_json(client: &reqwest::Client, base_url: &str, path: &str) -> Result<Value, String> {
     send(client.get(format!("{base_url}{path}"))).await
+}
+
+async fn get_json_with_query(
+    client: &reqwest::Client,
+    base_url: &str,
+    path: &str,
+    query: &[(&str, &str)],
+) -> Result<Value, String> {
+    send(client.get(format!("{base_url}{path}")).query(query)).await
 }
 
 async fn delete_json(

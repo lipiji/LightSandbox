@@ -184,6 +184,34 @@ fn write_exec_read_remove_round_trip() {
 }
 
 #[test]
+fn read_with_special_characters_in_path_round_trips() {
+    let (base_url, _dir) = start_server();
+
+    let (_, created) = cli(&base_url, &["create", "--ttl-seconds", "120"]);
+    let id = created["id"].as_str().unwrap().to_string();
+
+    let mut local_file = tempfile::NamedTempFile::new().unwrap();
+    write!(local_file, "content with special path").unwrap();
+    let local_path = local_file.path().to_str().unwrap();
+
+    // The remote filename contains characters that must be percent-encoded
+    // in the GET /files?path= query string (space, &, #) for `read` to find
+    // the right file rather than silently truncating/misparsing the query.
+    let remote_path = "a file&name#1.txt";
+
+    let (code, written) = cli(&base_url, &["write", &id, local_path, remote_path]);
+    assert_eq!(code, 0);
+    assert_eq!(written["written"], true);
+
+    let (code, read_result) = cli(&base_url, &["read", &id, remote_path]);
+    assert_eq!(code, 0);
+    assert!(read_result["content"]
+        .as_str()
+        .unwrap()
+        .contains("content with special path"));
+}
+
+#[test]
 fn exec_on_unknown_sandbox_fails_with_nonzero_exit() {
     let (base_url, _dir) = start_server();
     let (code, _) = cli(&base_url, &["exec", "sbx_doesnotexist", "echo hi"]);

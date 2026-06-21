@@ -53,9 +53,9 @@ def test_path_traversal_is_rejected(server_base_url):
     client = LightSandboxClient(server_base_url)
     sbx = client.create(ttl_seconds=120)
 
-    from lightsandbox import LightSandboxError
+    from lightsandbox import SandboxInvalidPath
 
-    with pytest.raises(LightSandboxError) as exc_info:
+    with pytest.raises(SandboxInvalidPath) as exc_info:
         sbx.write_file("../escape.txt", "nope")
     assert exc_info.value.code == "INVALID_PATH"
 

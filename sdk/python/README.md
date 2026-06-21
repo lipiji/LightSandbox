@@ -43,5 +43,11 @@ SandboxNotFound
 SandboxExpired
 SandboxTimeout
 SandboxExecError
+SandboxInvalidPath
+SandboxFileTooLarge
+SandboxOutputTooLarge
+SandboxRuntimeError
+SandboxConfigError
+SandboxInternalError
 LightSandboxConnectionError
 ```

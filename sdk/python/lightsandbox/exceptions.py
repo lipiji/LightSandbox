@@ -28,6 +28,30 @@ class SandboxExecError(LightSandboxError):
     """Raised when the server fails to execute a command."""
 
 
+class SandboxInvalidPath(LightSandboxError):
+    """Raised when a requested file path is rejected (traversal, absolute, etc.)."""
+
+
+class SandboxFileTooLarge(LightSandboxError):
+    """Raised when a file write exceeds the server's size limit."""
+
+
+class SandboxOutputTooLarge(LightSandboxError):
+    """Raised when a file read exceeds the server's size limit."""
+
+
+class SandboxRuntimeError(LightSandboxError):
+    """Raised when the server's runtime layer fails unexpectedly."""
+
+
+class SandboxConfigError(LightSandboxError):
+    """Raised when the server reports a configuration error."""
+
+
+class SandboxInternalError(LightSandboxError):
+    """Raised when the server reports an unspecified internal error."""
+
+
 class LightSandboxConnectionError(LightSandboxError):
     """Raised when the SDK cannot reach the LightSandbox server."""
 
@@ -37,6 +61,12 @@ _CODE_TO_EXCEPTION = {
     "SANDBOX_EXPIRED": SandboxExpired,
     "EXEC_TIMEOUT": SandboxTimeout,
     "EXEC_FAILED": SandboxExecError,
+    "INVALID_PATH": SandboxInvalidPath,
+    "FILE_TOO_LARGE": SandboxFileTooLarge,
+    "OUTPUT_TOO_LARGE": SandboxOutputTooLarge,
+    "RUNTIME_ERROR": SandboxRuntimeError,
+    "CONFIG_ERROR": SandboxConfigError,
+    "INTERNAL_ERROR": SandboxInternalError,
 }
 
 
