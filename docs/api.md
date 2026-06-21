@@ -179,6 +179,45 @@ Response:
 }
 ```
 
+## `POST /v1/sandboxes/{id}/files/upload`
+
+Binary-safe file upload via `multipart/form-data`. The JSON `PUT /files`
+endpoint above round-trips file content through a UTF-8 string, so it cannot
+carry arbitrary bytes (images, archives, etc.) losslessly — use this endpoint
+for anything that isn't guaranteed to be valid UTF-8 text.
+
+Fields:
+
+| Field | Required | Meaning |
+|---|---|---|
+| `file` | yes | The file content (any bytes) |
+| `path` | no | Destination path inside the workspace. Falls back to the `file` field's `filename` if omitted. |
+
+Same path rules as `PUT /files` (`../` and absolute paths rejected with
+`INVALID_PATH`); oversized uploads return `FILE_TOO_LARGE`.
+
+```bash
+curl -X POST http://127.0.0.1:8080/v1/sandboxes/sbx_abc123/files/upload \
+  -F path=data/photo.png \
+  -F file=@photo.png
+```
+
+Response:
+```json
+{"written": true, "path": "data/photo.png"}
+```
+
+## `GET /v1/sandboxes/{id}/files/download?path=main.bin`
+
+Binary-safe file download. Returns the raw bytes with
+`Content-Type: application/octet-stream` and
+`Content-Disposition: attachment; filename="..."` instead of wrapping them in
+a JSON string. Same path rules and error codes as `GET /files`.
+
+```bash
+curl -OJ http://127.0.0.1:8080/v1/sandboxes/sbx_abc123/files/download?path=data/photo.png
+```
+
 ## `DELETE /v1/sandboxes/{id}`
 
 Remove a sandbox and its workspace.

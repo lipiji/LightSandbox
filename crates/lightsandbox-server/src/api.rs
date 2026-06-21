@@ -1,8 +1,8 @@
 use std::convert::Infallible;
 use std::sync::Arc;
 
-use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::extract::{Multipart, Path, Query, State};
+use axum::http::{header, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
@@ -28,6 +28,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/sandboxes/:id/exec", post(exec_sandbox))
         .route("/v1/sandboxes/:id/exec/stream", post(exec_sandbox_stream))
         .route("/v1/sandboxes/:id/files", put(write_file).get(read_file))
+        .route("/v1/sandboxes/:id/files/upload", post(upload_file))
+        .route("/v1/sandboxes/:id/files/download", get(download_file))
         .with_state(state.clone())
         .merge(crate::e2b::router(state))
 }
@@ -198,4 +200,90 @@ async fn read_file(
         path: query.path,
         content: String::from_utf8_lossy(&bytes).into_owned(),
     }))
+}
+
+/// Binary-safe upload via `multipart/form-data`: a "path" text field naming
+/// the destination, and a "file" field carrying raw bytes. Unlike the JSON
+/// `PUT /files` endpoint (which round-trips content through a UTF-8 string),
+/// this preserves arbitrary bytes — needed for non-text files.
+async fn upload_file(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    mut multipart: Multipart,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let mut path: Option<String> = None;
+    let mut content: Option<Vec<u8>> = None;
+
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| ApiError(LightSandboxError::InvalidPath(e.to_string())))?
+    {
+        match field.name() {
+            Some("path") => {
+                path = Some(
+                    field
+                        .text()
+                        .await
+                        .map_err(|e| ApiError(LightSandboxError::InvalidPath(e.to_string())))?,
+                );
+            }
+            Some("file") => {
+                if path.is_none() {
+                    path = field.file_name().map(|s| s.to_string());
+                }
+                content = Some(
+                    field
+                        .bytes()
+                        .await
+                        .map_err(|e| ApiError(LightSandboxError::InvalidPath(e.to_string())))?
+                        .to_vec(),
+                );
+            }
+            _ => {}
+        }
+    }
+
+    let path = path.ok_or_else(|| {
+        ApiError(LightSandboxError::InvalidPath(
+            "missing \"path\" field and no filename on \"file\" field".to_string(),
+        ))
+    })?;
+    let content = content.ok_or_else(|| {
+        ApiError(LightSandboxError::InvalidPath(
+            "missing \"file\" field".to_string(),
+        ))
+    })?;
+
+    state.runtime.write_file(&id, &path, content).await?;
+    Ok(Json(json!({"written": true, "path": path})))
+}
+
+/// Binary-safe download: returns the raw file bytes with
+/// `application/octet-stream` instead of wrapping them in a JSON string
+/// (which would require lossy UTF-8 conversion for non-text files).
+async fn download_file(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(query): Query<ReadFileQuery>,
+) -> Result<Response, ApiError> {
+    let bytes = state.runtime.read_file(&id, &query.path).await?;
+    let filename = query
+        .path
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(&query.path)
+        .to_string();
+    Ok((
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "application/octet-stream".to_string()),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{filename}\""),
+            ),
+        ],
+        bytes,
+    )
+        .into_response())
 }

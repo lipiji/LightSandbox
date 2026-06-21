@@ -426,6 +426,136 @@ async fn create_with_template_populates_workspace_via_api() {
     assert_eq!(value["content"], "templated content");
 }
 
+fn multipart_body(boundary: &str, path: &str, filename: &str, content: &[u8]) -> Vec<u8> {
+    let mut body = Vec::new();
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(b"Content-Disposition: form-data; name=\"path\"\r\n\r\n");
+    body.extend_from_slice(path.as_bytes());
+    body.extend_from_slice(b"\r\n");
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(
+        format!(
+            "Content-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\nContent-Type: application/octet-stream\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(content);
+    body.extend_from_slice(b"\r\n");
+    body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+    body
+}
+
+#[tokio::test]
+async fn upload_download_round_trip_is_binary_safe() {
+    let app = test_app();
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/sandboxes")
+                .header("content-type", "application/json")
+                .body(Body::from(json!({}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let (_, value) = body_json(response).await;
+    let id = value["id"].as_str().unwrap().to_string();
+
+    // Includes bytes that are not valid UTF-8, which the JSON-based
+    // `/files` endpoint cannot round-trip losslessly.
+    let binary_content: Vec<u8> = vec![0, 159, 146, 150, 255, 0, 1, 2];
+    let boundary = "lightsandboxtestboundary";
+    let body = multipart_body(boundary, "binary.dat", "binary.dat", &binary_content);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/v1/sandboxes/{id}/files/upload"))
+                .header(
+                    "content-type",
+                    format!("multipart/form-data; boundary={boundary}"),
+                )
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let (status, value) = body_json(response).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(value["path"], "binary.dat");
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/sandboxes/{id}/files/download?path=binary.dat"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let content_type = response
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    assert_eq!(content_type, "application/octet-stream");
+    let disposition = response
+        .headers()
+        .get(axum::http::header::CONTENT_DISPOSITION)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    assert!(disposition.contains("binary.dat"), "got: {disposition}");
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(bytes.to_vec(), binary_content);
+}
+
+#[tokio::test]
+async fn upload_path_traversal_returns_invalid_path_error() {
+    let app = test_app();
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/sandboxes")
+                .header("content-type", "application/json")
+                .body(Body::from(json!({}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let (_, value) = body_json(response).await;
+    let id = value["id"].as_str().unwrap().to_string();
+
+    let boundary = "lightsandboxtestboundary2";
+    let body = multipart_body(boundary, "../escape.dat", "escape.dat", b"x");
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/v1/sandboxes/{id}/files/upload"))
+                .header(
+                    "content-type",
+                    format!("multipart/form-data; boundary={boundary}"),
+                )
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let (status, value) = body_json(response).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(value["error"]["code"], "INVALID_PATH");
+}
+
 #[tokio::test]
 async fn create_with_unknown_template_returns_invalid_path() {
     let app = test_app_with_templates(unique_dir("templates_empty"));
