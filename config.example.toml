@@ -1,0 +1,27 @@
+[server]
+host = "127.0.0.1"
+port = 8080
+
+[runtime]
+type = "local"
+workspace_root = "./data/workspaces"
+
+[limits]
+max_sandboxes = 100
+max_concurrent_exec = 20
+default_ttl_seconds = 600
+default_exec_timeout_seconds = 60
+max_stdout_bytes = 1048576
+max_stderr_bytes = 1048576
+max_file_size_bytes = 10485760
+max_read_file_bytes = 10485760
+
+[gc]
+enabled = true
+interval_seconds = 30
+remove_expired = true
+
+[security]
+allow_absolute_paths = false
+allow_path_traversal = false
+hide_host_paths = true

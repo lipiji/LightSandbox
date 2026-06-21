@@ -1,0 +1,22 @@
+[package]
+name = "lightsandbox-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "lightsandbox"
+path = "src/main.rs"
+
+[dependencies]
+lightsandbox-core = { path = "../lightsandbox-core" }
+lightsandbox-server = { path = "../lightsandbox-server" }
+tokio.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing-subscriber.workspace = true
+reqwest = { version = "0.12", features = ["json"] }
+
+[dev-dependencies]
+tempfile = "3"
