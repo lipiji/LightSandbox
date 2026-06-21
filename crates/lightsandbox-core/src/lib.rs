@@ -6,7 +6,7 @@ pub mod runtime;
 pub use error::LightSandboxError;
 pub use metrics::{format_prometheus, HistogramSnapshot, MetricsSnapshot};
 pub use models::{
-    ExecRequest, ExecResult, FileReadResponse, FileWriteRequest, ResourceLimits, RuntimeConfig,
-    SandboxId, SandboxInfo, SandboxSpec, SandboxStatus,
+    ExecOutputEvent, ExecRequest, ExecResult, FileReadResponse, FileWriteRequest, ResourceLimits,
+    RuntimeConfig, SandboxId, SandboxInfo, SandboxSpec, SandboxStatus,
 };
 pub use runtime::SandboxRuntime;

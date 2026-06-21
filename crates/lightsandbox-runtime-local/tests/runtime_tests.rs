@@ -1,6 +1,9 @@
+use std::sync::Arc;
 use std::time::Duration;
 
-use lightsandbox_core::{ExecRequest, ResourceLimits, RuntimeConfig, SandboxRuntime, SandboxSpec};
+use lightsandbox_core::{
+    ExecOutputEvent, ExecRequest, ResourceLimits, RuntimeConfig, SandboxRuntime, SandboxSpec,
+};
 use lightsandbox_runtime_local::LocalProcessRuntime;
 
 fn test_limits() -> ResourceLimits {
@@ -193,6 +196,87 @@ async fn exec_timeout_is_enforced() {
         .await
         .unwrap();
     assert!(result.timed_out);
+}
+
+#[tokio::test]
+async fn exec_stream_reports_chunks_and_done() {
+    let root = temp_dir("exec_stream");
+    let rt = Arc::new(test_runtime(&root));
+    let info = rt.create(SandboxSpec::default()).await.unwrap();
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+    let rt2 = rt.clone();
+    let id = info.id.clone();
+    let handle = tokio::spawn(async move {
+        rt2.exec_stream(
+            &id,
+            ExecRequest {
+                cmd: echo_cmd("hello-stream"),
+                timeout_seconds: None,
+                env: None,
+            },
+            tx,
+        )
+        .await
+    });
+
+    let mut stdout = Vec::new();
+    let mut done = None;
+    while let Some(event) = rx.recv().await {
+        match event {
+            ExecOutputEvent::Stdout(chunk) => stdout.extend_from_slice(&chunk),
+            ExecOutputEvent::Stderr(_) => {}
+            ExecOutputEvent::Done {
+                exit_code,
+                timed_out,
+                ..
+            } => done = Some((exit_code, timed_out)),
+            ExecOutputEvent::Error(msg) => panic!("unexpected error event: {msg}"),
+        }
+    }
+    handle.await.unwrap().unwrap();
+
+    let stdout = String::from_utf8_lossy(&stdout);
+    assert!(stdout.contains("hello-stream"), "stdout was: {stdout}");
+    assert_eq!(done, Some((0, false)));
+}
+
+#[tokio::test]
+async fn exec_stream_timeout_is_enforced() {
+    let root = temp_dir("exec_stream_timeout");
+    let rt = Arc::new(test_runtime(&root));
+    let info = rt.create(SandboxSpec::default()).await.unwrap();
+    let sleep_cmd = if cfg!(windows) {
+        "ping -n 6 127.0.0.1 > NUL".to_string()
+    } else {
+        "sleep 6".to_string()
+    };
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+    let rt2 = rt.clone();
+    let id = info.id.clone();
+    let handle = tokio::spawn(async move {
+        rt2.exec_stream(
+            &id,
+            ExecRequest {
+                cmd: sleep_cmd,
+                timeout_seconds: Some(1),
+                env: None,
+            },
+            tx,
+        )
+        .await
+    });
+
+    let mut done = None;
+    while let Some(event) = rx.recv().await {
+        if let ExecOutputEvent::Done { timed_out, .. } = event {
+            done = Some(timed_out);
+        }
+    }
+    handle.await.unwrap().unwrap();
+
+    assert_eq!(done, Some(true));
 }
 
 #[tokio::test]

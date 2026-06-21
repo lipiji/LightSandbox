@@ -1,8 +1,9 @@
 use async_trait::async_trait;
+use tokio::sync::mpsc::Sender;
 
 use crate::error::LightSandboxError;
 use crate::metrics::MetricsSnapshot;
-use crate::models::{ExecRequest, ExecResult, SandboxInfo, SandboxSpec};
+use crate::models::{ExecOutputEvent, ExecRequest, ExecResult, SandboxInfo, SandboxSpec};
 
 #[async_trait]
 pub trait SandboxRuntime: Send + Sync {
@@ -10,6 +11,18 @@ pub trait SandboxRuntime: Send + Sync {
     async fn list(&self) -> Result<Vec<SandboxInfo>, LightSandboxError>;
     async fn get(&self, id: &str) -> Result<SandboxInfo, LightSandboxError>;
     async fn exec(&self, id: &str, req: ExecRequest) -> Result<ExecResult, LightSandboxError>;
+    /// Like `exec`, but streams stdout/stderr chunks through `tx` as they
+    /// are produced instead of buffering the whole result. Returns `Err`
+    /// only for pre-flight failures (e.g. sandbox not found) discovered
+    /// before any output has been sent; once the process has started, all
+    /// outcomes — including failures — are reported as `ExecOutputEvent`s
+    /// terminating in exactly one `Done` or `Error` event.
+    async fn exec_stream(
+        &self,
+        id: &str,
+        req: ExecRequest,
+        tx: Sender<ExecOutputEvent>,
+    ) -> Result<(), LightSandboxError>;
     async fn write_file(
         &self,
         id: &str,

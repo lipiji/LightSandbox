@@ -9,11 +9,12 @@ use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
 use dashmap::DashMap;
 use lightsandbox_core::{
-    ExecRequest, ExecResult, LightSandboxError, MetricsSnapshot, RuntimeConfig, SandboxId,
-    SandboxInfo, SandboxRuntime, SandboxSpec, SandboxStatus,
+    ExecOutputEvent, ExecRequest, ExecResult, LightSandboxError, MetricsSnapshot, RuntimeConfig,
+    SandboxId, SandboxInfo, SandboxRuntime, SandboxSpec, SandboxStatus,
 };
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
+use tokio::sync::mpsc::Sender;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::metrics_collector::MetricsCollector;
@@ -212,6 +213,18 @@ async fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Builds the `Command` shared by `exec` and `exec_stream`: shell wrapper,
+/// workspace cwd, merged env, and piped stdout/stderr.
+fn build_command(workspace_path: &Path, env: &HashMap<String, String>, cmd: &str) -> Command {
+    let mut command = shell_command(cmd);
+    command.current_dir(workspace_path);
+    command.envs(env.clone());
+    command.kill_on_drop(true);
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+    command
+}
+
 fn shell_command(cmd: &str) -> Command {
     #[cfg(windows)]
     {
@@ -251,6 +264,27 @@ where
         }
     }
     out
+}
+
+/// Reads `reader` to EOF, sending each chunk through `tx` as it arrives
+/// instead of buffering. Stops early if the receiver is gone (client
+/// disconnected); the caller's overall exec timeout remains the backstop
+/// that prevents the child from blocking forever on an undrained pipe.
+async fn pump_reader<R>(mut reader: R, tx: Sender<ExecOutputEvent>, wrap: fn(Vec<u8>) -> ExecOutputEvent)
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut buf = [0u8; 8192];
+    loop {
+        match reader.read(&mut buf).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                if tx.send(wrap(buf[..n].to_vec())).await.is_err() {
+                    break;
+                }
+            }
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -383,12 +417,7 @@ impl SandboxRuntime for LocalProcessRuntime {
             .unwrap_or(self.config.limits.default_exec_timeout_seconds);
         let timeout_dur = std::time::Duration::from_secs(timeout_secs);
 
-        let mut command = shell_command(&req.cmd);
-        command.current_dir(&workspace_path);
-        command.envs(merged_env);
-        command.kill_on_drop(true);
-        command.stdout(Stdio::piped());
-        command.stderr(Stdio::piped());
+        let mut command = build_command(&workspace_path, &merged_env, &req.cmd);
 
         let start = Instant::now();
         let mut child = command
@@ -437,6 +466,88 @@ impl SandboxRuntime for LocalProcessRuntime {
                 })
             }
         }
+    }
+
+    async fn exec_stream(
+        &self,
+        id: &str,
+        req: ExecRequest,
+        tx: Sender<ExecOutputEvent>,
+    ) -> Result<(), LightSandboxError> {
+        let (workspace_path, mut merged_env) = {
+            let entry = self.get_active(id)?;
+            (self.workspace_dir(&entry.info.id), entry.env.clone())
+        };
+        if let Some(env) = req.env {
+            merged_env.extend(env);
+        }
+
+        let _permit = self
+            .exec_semaphore
+            .acquire()
+            .await
+            .map_err(|e| LightSandboxError::RuntimeError(e.to_string()))?;
+
+        let timeout_secs = req
+            .timeout_seconds
+            .unwrap_or(self.config.limits.default_exec_timeout_seconds);
+        let timeout_dur = std::time::Duration::from_secs(timeout_secs);
+
+        let mut command = build_command(&workspace_path, &merged_env, &req.cmd);
+
+        let start = Instant::now();
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(e) => {
+                let _ = tx.send(ExecOutputEvent::Error(e.to_string())).await;
+                return Ok(());
+            }
+        };
+
+        let pid = child.id();
+        let stdout = child.stdout.take().expect("stdout was piped");
+        let stderr = child.stderr.take().expect("stderr was piped");
+
+        let pump_fut = async {
+            tokio::join!(
+                pump_reader(stdout, tx.clone(), ExecOutputEvent::Stdout),
+                pump_reader(stderr, tx.clone(), ExecOutputEvent::Stderr),
+                child.wait(),
+            )
+        };
+
+        match tokio::time::timeout(timeout_dur, pump_fut).await {
+            Ok((_, _, Ok(status))) => {
+                let duration_ms = start.elapsed().as_millis();
+                self.metrics
+                    .record_exec(duration_ms.try_into().unwrap_or(u64::MAX), false);
+                let _ = tx
+                    .send(ExecOutputEvent::Done {
+                        exit_code: status.code().unwrap_or(-1),
+                        timed_out: false,
+                        duration_ms,
+                    })
+                    .await;
+            }
+            Ok((_, _, Err(e))) => {
+                let _ = tx.send(ExecOutputEvent::Error(e.to_string())).await;
+            }
+            Err(_elapsed) => {
+                kill_process_tree(pid).await;
+                let duration_ms = start.elapsed().as_millis();
+                self.metrics
+                    .record_exec(duration_ms.try_into().unwrap_or(u64::MAX), true);
+                let _ = tx
+                    .send(ExecOutputEvent::Done {
+                        exit_code: -1,
+                        timed_out: true,
+                        duration_ms,
+                    })
+                    .await;
+            }
+        }
+
+        Ok(())
     }
 
     async fn write_file(

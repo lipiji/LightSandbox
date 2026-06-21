@@ -121,6 +121,40 @@ Response:
 
 A command that exceeds `timeout_seconds` is forcibly terminated; the response has `timed_out: true` rather than an error envelope.
 
+## `POST /v1/sandboxes/{id}/exec/stream`
+
+Like `exec`, but streams stdout/stderr as [Server-Sent Events](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events) (`text/event-stream`) instead of buffering the whole result. Same request body as `exec`. A missing/expired sandbox still returns the normal JSON error envelope (checked before the stream opens); any failure that happens after the process has started is reported in-band as an `error` event instead.
+
+Event types:
+
+| `event:` | `data:` | Meaning |
+|---|---|---|
+| `stdout` | raw text chunk | A piece of stdout as it's produced |
+| `stderr` | raw text chunk | A piece of stderr as it's produced |
+| `done` | `{"exit_code":0,"timed_out":false,"duration_ms":123}` | Terminal event on normal completion or timeout |
+| `error` | message string | Terminal event if the process could not be observed to completion after starting |
+
+Each stream ends with exactly one `done` or `error` event. Multi-line chunks are sent as repeated `data:` lines per the SSE spec — join them with `\n` to reconstruct the original text.
+
+Example (`curl --no-buffer`):
+
+```text
+$ curl -N -X POST http://127.0.0.1:8080/v1/sandboxes/sbx_abc123/exec/stream \
+    -d '{"cmd":"python -u -c \"import time; [print(i) or time.sleep(0.3) for i in range(3)]\""}'
+
+event: stdout
+data: 0
+
+event: stdout
+data: 1
+
+event: stdout
+data: 2
+
+event: done
+data: {"exit_code":0,"timed_out":false,"duration_ms":912}
+```
+
 ## `PUT /v1/sandboxes/{id}/files`
 
 Write a file inside the sandbox's workspace. Parent directories are created automatically. Paths must stay inside the workspace (`../` and, by default, absolute paths are rejected with `INVALID_PATH`). Oversized writes return `FILE_TOO_LARGE`.

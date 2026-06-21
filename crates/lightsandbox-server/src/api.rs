@@ -1,16 +1,21 @@
+use std::convert::Infallible;
 use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
+use futures_util::{Stream, StreamExt};
 use lightsandbox_core::{
-    format_prometheus, ExecRequest, FileReadResponse, FileWriteRequest, LightSandboxError,
-    SandboxSpec,
+    format_prometheus, ExecOutputEvent, ExecRequest, FileReadResponse, FileWriteRequest,
+    LightSandboxError, SandboxSpec,
 };
 use serde::Deserialize;
 use serde_json::json;
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
 
 use crate::state::AppState;
 
@@ -21,6 +26,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/sandboxes", post(create_sandbox).get(list_sandboxes))
         .route("/v1/sandboxes/:id", get(get_sandbox).delete(remove_sandbox))
         .route("/v1/sandboxes/:id/exec", post(exec_sandbox))
+        .route("/v1/sandboxes/:id/exec/stream", post(exec_sandbox_stream))
         .route("/v1/sandboxes/:id/files", put(write_file).get(read_file))
         .with_state(state)
 }
@@ -111,6 +117,57 @@ async fn exec_sandbox(
 ) -> Result<Json<lightsandbox_core::ExecResult>, ApiError> {
     let result = state.runtime.exec(&id, req).await?;
     Ok(Json(result))
+}
+
+/// Streams stdout/stderr as Server-Sent Events instead of buffering the
+/// whole result. The sandbox is checked up front so a missing/expired
+/// sandbox still produces a normal JSON `ApiError` rather than a 200
+/// response that immediately errors mid-stream; once the SSE body has
+/// started, failures are surfaced in-band as an `error` event.
+async fn exec_sandbox_stream(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<ExecRequest>,
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
+    state.runtime.get(&id).await?;
+
+    let (tx, rx) = mpsc::channel::<ExecOutputEvent>(16);
+    let runtime = state.runtime.clone();
+    tokio::spawn(async move {
+        let _ = runtime.exec_stream(&id, req, tx).await;
+    });
+
+    let stream = ReceiverStream::new(rx).map(|event| Ok(exec_event_to_sse(event)));
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+/// SSE field values may not contain `\r` (axum panics if they do), but
+/// process output on Windows is full of `\r\n`. Strip it; `\n` alone is a
+/// valid line separator for SSE multi-line data.
+fn strip_cr(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).replace('\r', "")
+}
+
+fn exec_event_to_sse(event: ExecOutputEvent) -> Event {
+    match event {
+        ExecOutputEvent::Stdout(chunk) => Event::default().event("stdout").data(strip_cr(&chunk)),
+        ExecOutputEvent::Stderr(chunk) => Event::default().event("stderr").data(strip_cr(&chunk)),
+        ExecOutputEvent::Done {
+            exit_code,
+            timed_out,
+            duration_ms,
+        } => Event::default().event("done").data(
+            json!({
+                "exit_code": exit_code,
+                "timed_out": timed_out,
+                "duration_ms": duration_ms,
+            })
+            .to_string(),
+        ),
+        ExecOutputEvent::Error(message) => Event::default()
+            .event("error")
+            .data(message.replace('\r', "")),
+    }
 }
 
 async fn write_file(

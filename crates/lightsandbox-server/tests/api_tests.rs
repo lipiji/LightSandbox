@@ -317,6 +317,76 @@ async fn metrics_endpoint_exposes_prometheus_text() {
 }
 
 #[tokio::test]
+async fn exec_stream_returns_sse_events() {
+    let app = test_app();
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/sandboxes")
+                .header("content-type", "application/json")
+                .body(Body::from(json!({}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let (_, value) = body_json(response).await;
+    let id = value["id"].as_str().unwrap().to_string();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/v1/sandboxes/{id}/exec/stream"))
+                .header("content-type", "application/json")
+                .body(Body::from(json!({"cmd": "echo stream-test"}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let content_type = response
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    assert!(
+        content_type.starts_with("text/event-stream"),
+        "got: {content_type}"
+    );
+
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let body = String::from_utf8_lossy(&bytes);
+
+    assert!(body.contains("event: stdout"), "body: {body}");
+    assert!(body.contains("stream-test"), "body: {body}");
+    assert!(body.contains("event: done"), "body: {body}");
+    assert!(body.contains("\"exit_code\":0"), "body: {body}");
+}
+
+#[tokio::test]
+async fn exec_stream_unknown_sandbox_returns_json_error() {
+    let app = test_app();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/sandboxes/sbx_does_not_exist/exec/stream")
+                .header("content-type", "application/json")
+                .body(Body::from(json!({"cmd": "echo hi"}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let (status, value) = body_json(response).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(value["error"]["code"], "SANDBOX_NOT_FOUND");
+}
+
+#[tokio::test]
 async fn create_with_template_populates_workspace_via_api() {
     let templates_root = unique_dir("templates");
     let tpl = templates_root.join("hello");

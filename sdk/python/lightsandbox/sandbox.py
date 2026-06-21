@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Iterator
 
 
 @dataclass
@@ -54,6 +54,19 @@ class Sandbox:
     ) -> ExecResult:
         data = self._client.exec(self.id, cmd, timeout_seconds=timeout_seconds, env=env)
         return ExecResult.from_dict(data)
+
+    def exec_stream(
+        self,
+        cmd: str,
+        timeout_seconds: int | None = None,
+        env: dict[str, str] | None = None,
+    ) -> Iterator[tuple[str, Any]]:
+        """Like `exec`, but yields `("stdout"|"stderr", str)` chunks as they
+        arrive, followed by exactly one `("done", dict)`.
+        """
+        return self._client.exec_stream(
+            self.id, cmd, timeout_seconds=timeout_seconds, env=env
+        )
 
     def write_file(self, path: str, content: str) -> None:
         self._client.write_file(self.id, path, content)

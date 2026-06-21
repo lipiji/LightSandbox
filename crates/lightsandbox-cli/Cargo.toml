@@ -16,7 +16,8 @@ clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tracing-subscriber.workspace = true
-reqwest = { version = "0.12", features = ["json"] }
+futures-util.workspace = true
+reqwest = { version = "0.12", features = ["json", "stream"] }
 
 [dev-dependencies]
 tempfile = "3"

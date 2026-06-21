@@ -40,6 +40,32 @@ def test_write_exec_read_round_trip(server_base_url, python_exe):
     sbx.remove()
 
 
+def test_exec_stream_matches_buffered_exec(server_base_url, python_exe):
+    client = LightSandboxClient(server_base_url)
+    sbx = client.create(ttl_seconds=120)
+
+    sbx.write_file("main.py", "print('hello from stream test')")
+    cmd = f"{python_exe} main.py"
+
+    stdout_chunks = []
+    done = None
+    for kind, value in sbx.exec_stream(cmd):
+        if kind == "stdout":
+            stdout_chunks.append(value)
+        elif kind == "done":
+            done = value
+
+    assert done is not None
+    streamed_stdout = "".join(stdout_chunks)
+
+    result = sbx.exec(cmd)
+    assert "hello from stream test" in streamed_stdout
+    assert done["exit_code"] == result.exit_code == 0
+    assert done["timed_out"] == result.timed_out == False
+
+    sbx.remove()
+
+
 def test_exec_after_remove_raises_sandbox_not_found(server_base_url):
     client = LightSandboxClient(server_base_url)
     sbx = client.create(ttl_seconds=120)

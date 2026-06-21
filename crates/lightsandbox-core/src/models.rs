@@ -80,6 +80,22 @@ pub struct ExecResult {
     pub timed_out: bool,
 }
 
+/// One event in a streaming exec session. A session emits zero or more
+/// `Stdout`/`Stderr` chunks followed by exactly one terminal event
+/// (`Done` on normal completion or timeout, `Error` if the process could
+/// not be observed to completion after it had already started).
+#[derive(Debug, Clone)]
+pub enum ExecOutputEvent {
+    Stdout(Vec<u8>),
+    Stderr(Vec<u8>),
+    Done {
+        exit_code: i32,
+        timed_out: bool,
+        duration_ms: u128,
+    },
+    Error(String),
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileWriteRequest {
     pub path: String,
