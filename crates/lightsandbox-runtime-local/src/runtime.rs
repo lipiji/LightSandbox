@@ -84,6 +84,22 @@ impl LocalProcessRuntime {
         Ok(entry)
     }
 
+    fn get_active_mut(
+        &self,
+        id: &str,
+    ) -> Result<dashmap::mapref::one::RefMut<'_, String, SandboxEntry>, LightSandboxError> {
+        let entry = self
+            .sandboxes
+            .get_mut(id)
+            .ok_or(LightSandboxError::SandboxNotFound)?;
+        if let Some(expires_at) = entry.info.expires_at {
+            if expires_at <= Utc::now() {
+                return Err(LightSandboxError::SandboxExpired);
+            }
+        }
+        Ok(entry)
+    }
+
     /// Logs the full I/O error detail server-side, but only includes it in
     /// the client-facing message when `hide_host_paths` is disabled — keeps
     /// host filesystem details out of API responses by default.
@@ -609,6 +625,16 @@ impl SandboxRuntime for LocalProcessRuntime {
             .map_err(|e| self.io_error("reading file", e))?;
         self.metrics.record_file_read();
         Ok(bytes)
+    }
+
+    async fn extend_ttl(
+        &self,
+        id: &str,
+        ttl_seconds: u64,
+    ) -> Result<SandboxInfo, LightSandboxError> {
+        let mut entry = self.get_active_mut(id)?;
+        entry.info.expires_at = Some(Utc::now() + ChronoDuration::seconds(ttl_seconds as i64));
+        Ok(entry.info.clone())
     }
 
     async fn remove(&self, id: &str) -> Result<(), LightSandboxError> {

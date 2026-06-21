@@ -30,6 +30,13 @@ pub trait SandboxRuntime: Send + Sync {
         content: Vec<u8>,
     ) -> Result<(), LightSandboxError>;
     async fn read_file(&self, id: &str, path: &str) -> Result<Vec<u8>, LightSandboxError>;
+    /// Sets (does not add to) the sandbox's expiry to `now + ttl_seconds`,
+    /// matching E2B's `timeout` endpoint semantics. Returns the updated info.
+    async fn extend_ttl(
+        &self,
+        id: &str,
+        ttl_seconds: u64,
+    ) -> Result<SandboxInfo, LightSandboxError>;
     async fn remove(&self, id: &str) -> Result<(), LightSandboxError>;
     async fn cleanup_expired(&self) -> Result<usize, LightSandboxError>;
     /// Returns a point-in-time snapshot of runtime-wide counters and gauges

@@ -175,6 +175,31 @@ async fn exec_after_remove_is_rejected() {
 }
 
 #[tokio::test]
+async fn extend_ttl_moves_expiry_forward() {
+    let root = temp_dir("extend_ttl");
+    let rt = test_runtime(&root);
+    let info = rt
+        .create(SandboxSpec {
+            ttl_seconds: Some(10),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let original_expiry = info.expires_at.unwrap();
+
+    let updated = rt.extend_ttl(&info.id, 9999).await.unwrap();
+    assert!(updated.expires_at.unwrap() > original_expiry);
+}
+
+#[tokio::test]
+async fn extend_ttl_on_unknown_sandbox_is_rejected() {
+    let root = temp_dir("extend_ttl_missing");
+    let rt = test_runtime(&root);
+    let result = rt.extend_ttl("sbx_does_not_exist", 60).await;
+    assert!(result.is_err());
+}
+
+#[tokio::test]
 async fn exec_timeout_is_enforced() {
     let root = temp_dir("timeout");
     let rt = test_runtime(&root);

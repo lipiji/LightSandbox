@@ -28,10 +28,11 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/sandboxes/:id/exec", post(exec_sandbox))
         .route("/v1/sandboxes/:id/exec/stream", post(exec_sandbox_stream))
         .route("/v1/sandboxes/:id/files", put(write_file).get(read_file))
-        .with_state(state)
+        .with_state(state.clone())
+        .merge(crate::e2b::router(state))
 }
 
-struct ApiError(LightSandboxError);
+pub(crate) struct ApiError(LightSandboxError);
 
 impl From<LightSandboxError> for ApiError {
     fn from(e: LightSandboxError) -> Self {

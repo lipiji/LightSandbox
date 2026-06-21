@@ -35,6 +35,8 @@ LightSandbox aims for the middle: more engineered than raw subprocess, lighter t
 
 LightSandbox v0.1 does not try to match the isolation guarantees of the others — it trades isolation strength for installation simplicity and is meant to be replaced or supplemented with a stronger runtime when untrusted code execution is required.
 
+LightSandbox also exposes a lifecycle-only [E2B-compatible API subset](docs/e2b-compat.md) (`/e2b/sandboxes`) alongside its native API, for tooling already written against E2B's control plane.
+
 ## Quick start
 
 ```bash

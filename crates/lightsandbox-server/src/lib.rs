@@ -1,5 +1,6 @@
 pub mod api;
 pub mod config;
+pub mod e2b;
 pub mod gc;
 pub mod state;
 
