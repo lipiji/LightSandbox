@@ -66,9 +66,16 @@ Request:
 {
   "ttl_seconds": 600,
   "env": {"PYTHONUNBUFFERED": "1"},
-  "metadata": {"agent_id": "demo-agent"}
+  "metadata": {"agent_id": "demo-agent"},
+  "template": "python-ml"
 }
 ```
+
+`template` (optional) names a subdirectory under the server's `templates_dir`
+(see config `[templates] dir`). If set, the template's contents are copied into
+the new workspace at create time, so the sandbox starts with those files
+already present instead of empty. An unknown template, or any template when
+templates are not configured, returns `INVALID_PATH`.
 
 Response:
 ```json
@@ -146,3 +153,32 @@ Response:
 ```json
 {"removed": true}
 ```
+
+## Templates
+
+A template is just a directory under `templates_dir` (set via
+`[templates] dir` in the config):
+
+```text
+data/templates/
+  python-ml/        # template name = "python-ml"
+    requirements.txt
+    helper.py
+    lib/
+      util.py
+```
+
+`POST /v1/sandboxes` with `{"template": "python-ml"}` recursively copies that
+directory into the new workspace. Templates are operator-placed and trusted
+(like the workspace root) — they are not a sandboxing boundary. Comment out the
+`[templates]` section to disable template support entirely.
+
+## Warm pool (optional)
+
+`[pool] enabled = true, min_idle = N` pre-builds `N` bare workspace
+directories at startup and hands them out to template-less creates, refilling
+lazily in the background. Pooled slots are invisible to `GET /v1/sandboxes`
+and exempt from TTL/GC until handed out. It is **off by default**:
+`LocalProcessRuntime` creates are already microsecond-scale, so this mainly
+reserves the interface for future runtimes (Docker/Firecracker) where
+cold-start cost is real.

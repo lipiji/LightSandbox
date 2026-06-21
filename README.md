@@ -21,6 +21,7 @@ LightSandbox aims for the middle: more engineered than raw subprocess, lighter t
 - **Concurrency-aware**: designed for multiple agents creating sandboxes and running commands at the same time.
 - **REST API, Python SDK, and CLI**, all built on the same HTTP surface.
 - **Observable**: a Prometheus `/metrics` endpoint exposes sandbox/exec/GC counters and an exec-duration histogram, scrapable with no extra config.
+- **Templates**: create a sandbox from a named template directory so it starts pre-populated with files/dependencies — no per-sandbox `write_file` churn.
 - **Runtime-agnostic core**: a single `SandboxRuntime` trait, implemented today by `LocalProcessRuntime`, with `DockerRuntime`, `KubernetesRuntime`, `FirecrackerRuntime`, and others as future, optional backends behind the same interface.
 - **Honest about its security boundary**: see below.
 

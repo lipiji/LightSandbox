@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -9,16 +10,9 @@ use lightsandbox_server::{api, state::AppState};
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
-fn test_app() -> axum::Router {
-    let dir = std::env::temp_dir().join(format!(
-        "lightsandbox_api_test_{:x}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    let config = RuntimeConfig {
-        workspace_root: dir,
+fn test_config(workspace_root: PathBuf, templates_dir: Option<PathBuf>) -> RuntimeConfig {
+    RuntimeConfig {
+        workspace_root,
         limits: ResourceLimits {
             max_sandboxes: 100,
             max_concurrent_exec: 20,
@@ -33,8 +27,36 @@ fn test_app() -> axum::Router {
         allow_path_traversal: false,
         hide_host_paths: true,
         remove_expired: true,
-    };
-    let runtime = Arc::new(LocalProcessRuntime::new(config));
+        templates_dir,
+        pool_enabled: false,
+        pool_min_idle: 0,
+    }
+}
+
+fn unique_dir(prefix: &str) -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "lightsandbox_{prefix}_{:x}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ))
+}
+
+fn test_app() -> axum::Router {
+    let runtime = Arc::new(LocalProcessRuntime::new(test_config(
+        unique_dir("api_test"),
+        None,
+    )));
+    let state = Arc::new(AppState { runtime });
+    api::router(state)
+}
+
+fn test_app_with_templates(templates_dir: PathBuf) -> axum::Router {
+    let runtime = Arc::new(LocalProcessRuntime::new(test_config(
+        unique_dir("api_tpl"),
+        Some(templates_dir),
+    )));
     let state = Arc::new(AppState { runtime });
     api::router(state)
 }
@@ -292,4 +314,63 @@ async fn metrics_endpoint_exposes_prometheus_text() {
     );
     // A created sandbox should be reflected in the counter.
     assert!(body.contains("lightsandbox_sandboxes_created_total 1"));
+}
+
+#[tokio::test]
+async fn create_with_template_populates_workspace_via_api() {
+    let templates_root = unique_dir("templates");
+    let tpl = templates_root.join("hello");
+    std::fs::create_dir_all(&tpl).unwrap();
+    std::fs::write(tpl.join("seed.txt"), "templated content").unwrap();
+
+    let app = test_app_with_templates(templates_root);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/sandboxes")
+                .header("content-type", "application/json")
+                .body(Body::from(json!({"template": "hello"}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let (status, value) = body_json(response).await;
+    assert_eq!(status, StatusCode::OK);
+    let id = value["id"].as_str().unwrap().to_string();
+
+    // The templated file should be readable without any prior write_file.
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/sandboxes/{id}/files?path=seed.txt"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let (status, value) = body_json(response).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(value["content"], "templated content");
+}
+
+#[tokio::test]
+async fn create_with_unknown_template_returns_invalid_path() {
+    let app = test_app_with_templates(unique_dir("templates_empty"));
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/sandboxes")
+                .header("content-type", "application/json")
+                .body(Body::from(json!({"template": "missing"}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let (status, value) = body_json(response).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(value["error"]["code"], "INVALID_PATH");
 }

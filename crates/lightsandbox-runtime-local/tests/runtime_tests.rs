@@ -3,23 +3,30 @@ use std::time::Duration;
 use lightsandbox_core::{ExecRequest, ResourceLimits, RuntimeConfig, SandboxRuntime, SandboxSpec};
 use lightsandbox_runtime_local::LocalProcessRuntime;
 
+fn test_limits() -> ResourceLimits {
+    ResourceLimits {
+        max_sandboxes: 1000,
+        max_concurrent_exec: 50,
+        default_ttl_seconds: 600,
+        default_exec_timeout_seconds: 5,
+        max_stdout_bytes: 4096,
+        max_stderr_bytes: 4096,
+        max_file_size_bytes: 1024,
+        max_read_file_bytes: 1024,
+    }
+}
+
 fn test_runtime(root: &std::path::Path) -> LocalProcessRuntime {
     let config = RuntimeConfig {
         workspace_root: root.to_path_buf(),
-        limits: ResourceLimits {
-            max_sandboxes: 1000,
-            max_concurrent_exec: 50,
-            default_ttl_seconds: 600,
-            default_exec_timeout_seconds: 5,
-            max_stdout_bytes: 4096,
-            max_stderr_bytes: 4096,
-            max_file_size_bytes: 1024,
-            max_read_file_bytes: 1024,
-        },
+        limits: test_limits(),
         allow_absolute_paths: false,
         allow_path_traversal: false,
         hide_host_paths: true,
         remove_expired: true,
+        templates_dir: None,
+        pool_enabled: false,
+        pool_min_idle: 0,
     };
     LocalProcessRuntime::new(config)
 }
@@ -218,6 +225,7 @@ async fn gc_cleans_expired_sandbox() {
             ttl_seconds: Some(0),
             metadata: None,
             env: None,
+            template: None,
         })
         .await
         .unwrap();
@@ -321,4 +329,113 @@ async fn metrics_count_exec_timeout_separately() {
     let snap = rt.metrics().await.unwrap();
     assert_eq!(snap.exec_total, 1);
     assert_eq!(snap.exec_timed_out_total, 1);
+}
+
+fn runtime_with_templates(
+    root: &std::path::Path,
+    templates_dir: std::path::PathBuf,
+) -> LocalProcessRuntime {
+    let config = RuntimeConfig {
+        workspace_root: root.to_path_buf(),
+        limits: test_limits(),
+        allow_absolute_paths: false,
+        allow_path_traversal: false,
+        hide_host_paths: true,
+        remove_expired: true,
+        templates_dir: Some(templates_dir),
+        pool_enabled: false,
+        pool_min_idle: 0,
+    };
+    LocalProcessRuntime::new(config)
+}
+
+#[tokio::test]
+async fn create_with_template_populates_workspace() {
+    let root = temp_dir("template");
+    let templates_dir = root.join("templates");
+    let tpl = templates_dir.join("demo");
+    tokio::fs::create_dir_all(tpl.join("sub")).await.unwrap();
+    tokio::fs::write(tpl.join("greet.txt"), b"hi from template")
+        .await
+        .unwrap();
+    tokio::fs::write(tpl.join("sub/nested.txt"), b"nested")
+        .await
+        .unwrap();
+
+    let rt = runtime_with_templates(&root, templates_dir);
+    let info = rt
+        .create(SandboxSpec {
+            ttl_seconds: None,
+            metadata: None,
+            env: None,
+            template: Some("demo".into()),
+        })
+        .await
+        .unwrap();
+
+    // Both the top-level file and the nested one were copied through.
+    let top = rt.read_file(&info.id, "greet.txt").await.unwrap();
+    assert_eq!(top, b"hi from template");
+    let nested = rt.read_file(&info.id, "sub/nested.txt").await.unwrap();
+    assert_eq!(nested, b"nested");
+}
+
+#[tokio::test]
+async fn unknown_template_is_rejected() {
+    let root = temp_dir("template_missing");
+    let rt = runtime_with_templates(&root, root.join("templates"));
+    let result = rt
+        .create(SandboxSpec {
+            ttl_seconds: None,
+            metadata: None,
+            env: None,
+            template: Some("does-not-exist".into()),
+        })
+        .await;
+    assert!(
+        matches!(
+            result,
+            Err(lightsandbox_core::LightSandboxError::InvalidPath(_))
+        ),
+        "expected InvalidPath, got {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn pool_reuses_idle_slots_and_stays_consistent() {
+    let root = temp_dir("pool");
+    let config = RuntimeConfig {
+        workspace_root: root.to_path_buf(),
+        limits: test_limits(),
+        allow_absolute_paths: false,
+        allow_path_traversal: false,
+        hide_host_paths: true,
+        remove_expired: true,
+        templates_dir: None,
+        pool_enabled: true,
+        pool_min_idle: 2,
+    };
+    let rt = LocalProcessRuntime::new(config);
+    rt.prewarm().await;
+
+    // Several template-less creates: each reuses a pooled slot when one is
+    // available, otherwise builds fresh. list() must reflect only handed-out
+    // sandboxes (idle slots never leak in), and metrics must count exactly the
+    // creates issued.
+    let mut ids = Vec::new();
+    for _ in 0..5 {
+        let info = rt.create(SandboxSpec::default()).await.unwrap();
+        ids.push(info.id);
+        // Let the lazy replenish task make progress between iterations.
+        tokio::task::yield_now().await;
+    }
+
+    let listed = rt.list().await.unwrap();
+    assert_eq!(listed.len(), 5, "idle slots must not appear in list()");
+    for id in &ids {
+        assert!(listed.iter().any(|s| s.id == *id));
+    }
+
+    let snap = rt.metrics().await.unwrap();
+    assert_eq!(snap.sandboxes_created_total, 5);
 }

@@ -25,3 +25,17 @@ remove_expired = true
 allow_absolute_paths = false
 allow_path_traversal = false
 hide_host_paths = true
+
+[templates]
+# Root directory of on-disk templates. Each subdirectory is a template named
+# after the subdirectory; create a sandbox with {"template": "<name>"} to copy
+# its contents into the new workspace at create time. Comment out to disable.
+dir = "./data/templates"
+
+[pool]
+# Warm pool of pre-built bare sandboxes. Off by default: LocalProcessRuntime
+# creates are already microsecond-scale, so this mainly reserves the interface
+# for future runtimes (Docker/Firecracker). When enabled, `min_idle` bare
+# workspace dirs are pre-created and handed out to template-less creates.
+enabled = false
+min_idle = 5

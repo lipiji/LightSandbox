@@ -66,3 +66,19 @@ def test_connection_error_for_unreachable_server():
     client = LightSandboxClient("http://127.0.0.1:1", timeout=1.0)
     with pytest.raises(LightSandboxConnectionError):
         client.list()
+
+
+def test_create_with_template_populates_workspace(server_with_templates):
+    from lightsandbox import LightSandboxClient, SandboxInvalidPath
+
+    client = LightSandboxClient(server_with_templates)
+    sbx = client.create(template="sdkdemo")
+    try:
+        content = sbx.read_file("seed.txt")
+        assert "from template via sdk" in content
+    finally:
+        sbx.remove()
+
+    # Unknown template is rejected with the structured error.
+    with pytest.raises(SandboxInvalidPath):
+        client.create(template="missing")

@@ -42,6 +42,18 @@ pub struct SecuritySection {
     pub hide_host_paths: bool,
 }
 
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct TemplatesSection {
+    /// Root directory of on-disk templates; absence disables templates.
+    pub dir: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct PoolSection {
+    pub enabled: bool,
+    pub min_idle: usize,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct AppConfig {
     pub server: ServerSection,
@@ -49,6 +61,10 @@ pub struct AppConfig {
     pub limits: LimitsSection,
     pub gc: GcSection,
     pub security: SecuritySection,
+    #[serde(default)]
+    pub templates: TemplatesSection,
+    #[serde(default)]
+    pub pool: PoolSection,
 }
 
 impl AppConfig {
@@ -82,6 +98,9 @@ impl AppConfig {
             allow_path_traversal: self.security.allow_path_traversal,
             hide_host_paths: self.security.hide_host_paths,
             remove_expired: self.gc.remove_expired,
+            templates_dir: self.templates.dir.as_ref().map(|s| PathBuf::from(s)),
+            pool_enabled: self.pool.enabled,
+            pool_min_idle: self.pool.min_idle,
         }
     }
 }

@@ -1,15 +1,16 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
 use dashmap::DashMap;
 use lightsandbox_core::{
-    ExecRequest, ExecResult, LightSandboxError, MetricsSnapshot, RuntimeConfig, SandboxInfo,
-    SandboxRuntime, SandboxSpec, SandboxStatus,
+    ExecRequest, ExecResult, LightSandboxError, MetricsSnapshot, RuntimeConfig, SandboxId,
+    SandboxInfo, SandboxRuntime, SandboxSpec, SandboxStatus,
 };
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
@@ -26,12 +27,25 @@ struct SandboxEntry {
     _permit: OwnedSemaphorePermit,
 }
 
+/// A pre-built, unassigned sandbox kept in the warm pool: its workspace dir
+/// already exists and its `max_sandboxes` permit is already held. Lives outside
+/// the `sandboxes` DashMap so it is invisible to `list()` and exempt from
+/// TTL/GC until handed out by `create`.
+struct IdleSlot {
+    id: SandboxId,
+    workspace_path: PathBuf,
+    permit: OwnedSemaphorePermit,
+}
+
 pub struct LocalProcessRuntime {
     config: RuntimeConfig,
     sandboxes: DashMap<String, SandboxEntry>,
     exec_semaphore: Arc<Semaphore>,
     sandbox_semaphore: Arc<Semaphore>,
     metrics: Arc<MetricsCollector>,
+    idle_slots: Arc<Mutex<Vec<IdleSlot>>>,
+    /// Number of replenish tasks currently in flight, used to bound spawns.
+    replenish_in_flight: Arc<AtomicUsize>,
 }
 
 impl LocalProcessRuntime {
@@ -44,6 +58,8 @@ impl LocalProcessRuntime {
             exec_semaphore,
             sandbox_semaphore,
             metrics: Arc::new(MetricsCollector::new()),
+            idle_slots: Arc::new(Mutex::new(Vec::new())),
+            replenish_in_flight: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -78,6 +94,122 @@ impl LocalProcessRuntime {
             LightSandboxError::RuntimeError(format!("{context}: {e}"))
         }
     }
+
+    // --- warm pool helpers ---
+
+    /// Pops a pre-warmed idle slot, if one is available.
+    fn pop_idle_slot(&self) -> Option<IdleSlot> {
+        self.idle_slots
+            .lock()
+            .ok()
+            .and_then(|mut slots| slots.pop())
+    }
+
+    /// Builds a brand-new slot: acquires a `max_sandboxes` permit, mints an id,
+    /// and creates the workspace dir. Returns `None` if the permit cannot be
+    /// acquired (capacity saturated) or the dir cannot be created.
+    async fn fresh_slot(
+        &self,
+    ) -> Result<(SandboxId, PathBuf, OwnedSemaphorePermit), LightSandboxError> {
+        let permit = self
+            .sandbox_semaphore
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| LightSandboxError::RuntimeError("max_sandboxes limit reached".into()))?;
+        let id = SandboxId::new();
+        let workspace_path = self.workspace_dir(id.as_str());
+        tokio::fs::create_dir_all(&workspace_path)
+            .await
+            .map_err(|e| self.io_error("creating workspace", e))?;
+        Ok((id, workspace_path, permit))
+    }
+
+    /// Fills the pool up to `pool_min_idle` at startup. Stops early if
+    /// `max_sandboxes` capacity is saturated (best-effort).
+    pub async fn prewarm(&self) {
+        if !self.config.pool_enabled || self.config.pool_min_idle == 0 {
+            return;
+        }
+        let mut built = 0usize;
+        for _ in 0..self.config.pool_min_idle {
+            if let Some(slot) =
+                build_slot(&self.sandbox_semaphore, &self.config.workspace_root).await
+            {
+                if let Ok(mut slots) = self.idle_slots.lock() {
+                    slots.push(slot);
+                    built += 1;
+                }
+            } else {
+                break;
+            }
+        }
+        tracing::info!(
+            target = self.config.pool_min_idle,
+            built,
+            "warm pool prewarmed"
+        );
+    }
+
+    /// Lazily refills the pool after a create consumed a slot. Spawns a
+    /// background task only when `idle + in_flight < min_idle`, and uses
+    /// `replenish_in_flight` to prevent spawn storms. Fire-and-forget.
+    fn maybe_replenish(&self) {
+        if self.config.pool_min_idle == 0 {
+            return;
+        }
+        let idle = self.idle_slots.lock().map(|s| s.len()).unwrap_or(0);
+        let in_flight = self.replenish_in_flight.load(Ordering::Relaxed);
+        if idle + in_flight >= self.config.pool_min_idle {
+            return;
+        }
+        self.replenish_in_flight.fetch_add(1, Ordering::Relaxed);
+        let semaphore = Arc::clone(&self.sandbox_semaphore);
+        let idle_slots = Arc::clone(&self.idle_slots);
+        let in_flight = Arc::clone(&self.replenish_in_flight);
+        let workspace_root = self.config.workspace_root.clone();
+        tokio::spawn(async move {
+            if let Some(slot) = build_slot(&semaphore, &workspace_root).await {
+                if let Ok(mut slots) = idle_slots.lock() {
+                    slots.push(slot);
+                }
+            }
+            in_flight.fetch_sub(1, Ordering::Relaxed);
+        });
+    }
+}
+
+/// Acquires a permit, mints an id, and creates the workspace dir — the shared
+/// building block for both synchronous `prewarm` and the spawned replenish
+/// task. Returns `None` on capacity saturation or IO failure.
+async fn build_slot(semaphore: &Arc<Semaphore>, workspace_root: &Path) -> Option<IdleSlot> {
+    let permit = semaphore.clone().try_acquire_owned().ok()?;
+    let id = SandboxId::new();
+    let workspace_path = workspace_root.join(id.as_str());
+    tokio::fs::create_dir_all(&workspace_path).await.ok()?;
+    Some(IdleSlot {
+        id,
+        workspace_path,
+        permit,
+    })
+}
+
+/// Recursively copies `src` into `dst`, creating `dst`. Async and zero-dep.
+/// Symlinks and other special file types are skipped. The recursive call is
+/// boxed to give the future a bounded size.
+async fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+    tokio::fs::create_dir_all(dst).await?;
+    let mut entries = tokio::fs::read_dir(src).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        let file_type = entry.file_type().await?;
+        if file_type.is_dir() {
+            Box::pin(copy_dir_recursive(&from, &to)).await?;
+        } else if file_type.is_file() {
+            tokio::fs::copy(&from, &to).await?;
+        }
+    }
+    Ok(())
 }
 
 fn shell_command(cmd: &str) -> Command {
@@ -147,17 +279,42 @@ async fn kill_process_tree(pid: Option<u32>) {
 #[async_trait]
 impl SandboxRuntime for LocalProcessRuntime {
     async fn create(&self, spec: SandboxSpec) -> Result<SandboxInfo, LightSandboxError> {
-        let permit = self
-            .sandbox_semaphore
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| LightSandboxError::RuntimeError("max_sandboxes limit reached".into()))?;
+        // Resolve the template source up front so we fail fast (and before
+        // touching the pool or filesystem).
+        let template_src = match &spec.template {
+            Some(name) => {
+                let root = self.config.templates_dir.as_ref().ok_or_else(|| {
+                    LightSandboxError::InvalidPath("templates not configured".into())
+                })?;
+                let src = root.join(name);
+                if !src.is_dir() {
+                    return Err(LightSandboxError::InvalidPath(format!(
+                        "template not found: {name}"
+                    )));
+                }
+                Some(src)
+            }
+            None => None,
+        };
 
-        let id = lightsandbox_core::SandboxId::new();
-        let workspace_path = self.workspace_dir(id.as_str());
-        tokio::fs::create_dir_all(&workspace_path)
-            .await
-            .map_err(|e| self.io_error("creating workspace", e))?;
+        // Obtain a workspace: reuse a pooled bare slot when the create is
+        // template-less and the pool is on; otherwise build fresh. A templated
+        // create never consumes the pool (slots are bare by design).
+        let (id, workspace_path, permit) = if template_src.is_none() && self.config.pool_enabled {
+            match self.pop_idle_slot() {
+                Some(slot) => (slot.id, slot.workspace_path, slot.permit),
+                None => self.fresh_slot().await?,
+            }
+        } else {
+            self.fresh_slot().await?
+        };
+
+        // Apply the template, if any, into the now-existing workspace.
+        if let Some(src) = template_src {
+            copy_dir_recursive(&src, &workspace_path)
+                .await
+                .map_err(|e| self.io_error("copying template", e))?;
+        }
 
         let created_at = Utc::now();
         let ttl_seconds = spec
@@ -184,6 +341,12 @@ impl SandboxRuntime for LocalProcessRuntime {
         );
 
         self.metrics.record_create();
+
+        // Lazily refill the pool if this create drained it.
+        if self.config.pool_enabled {
+            self.maybe_replenish();
+        }
+
         Ok(info)
     }
 

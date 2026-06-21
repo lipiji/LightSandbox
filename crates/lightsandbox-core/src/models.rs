@@ -48,6 +48,10 @@ pub struct SandboxSpec {
     pub ttl_seconds: Option<u64>,
     pub metadata: Option<HashMap<String, String>>,
     pub env: Option<HashMap<String, String>>,
+    /// Name of a template (a subdirectory under the runtime's `templates_dir`)
+    /// whose contents are copied into the new workspace at create time. When
+    /// `None`, the workspace starts empty.
+    pub template: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -123,6 +127,13 @@ pub struct RuntimeConfig {
     pub allow_path_traversal: bool,
     pub hide_host_paths: bool,
     pub remove_expired: bool,
+    /// Root directory of on-disk templates. Each subdirectory is a template
+    /// named after the subdirectory; `None` disables template support.
+    pub templates_dir: Option<std::path::PathBuf>,
+    /// Whether a warm pool of pre-built bare sandboxes is maintained.
+    pub pool_enabled: bool,
+    /// Target number of idle slots the pool tries to maintain.
+    pub pool_min_idle: usize,
 }
 
 impl Default for RuntimeConfig {
@@ -134,6 +145,9 @@ impl Default for RuntimeConfig {
             allow_path_traversal: false,
             hide_host_paths: true,
             remove_expired: true,
+            templates_dir: None,
+            pool_enabled: false,
+            pool_min_idle: 0,
         }
     }
 }

@@ -30,6 +30,9 @@ enum Commands {
     Create {
         #[arg(long)]
         ttl_seconds: Option<u64>,
+        /// Name of a template (subdir of templates_dir) to pre-populate the workspace.
+        #[arg(long)]
+        template: Option<String>,
     },
     /// List all sandboxes.
     List,
@@ -66,11 +69,15 @@ async fn main() {
             }
             return;
         }
-        Commands::Create { ttl_seconds } => {
+        Commands::Create {
+            ttl_seconds,
+            template,
+        } => {
             let spec = SandboxSpec {
                 ttl_seconds,
                 metadata: None,
                 env: None,
+                template,
             };
             post_json(&client, &cli.base_url, "/v1/sandboxes", &spec).await
         }

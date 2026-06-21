@@ -6,6 +6,7 @@ verified against the real HTTP/JSON contract.
 
 from __future__ import annotations
 
+import contextlib
 import socket
 import subprocess
 import sys
@@ -43,13 +44,15 @@ def _wait_for_port(port: int, timeout: float = 10.0) -> None:
     raise TimeoutError(f"server did not open port {port} within {timeout}s")
 
 
-@pytest.fixture()
-def server_base_url(tmp_path: Path):
-    port = _free_port()
-    workspace_root = tmp_path / "data"
-    config_path = tmp_path / "config.toml"
-    config_path.write_text(
-        f"""
+def _config_text(
+    port: int, workspace_root: Path, templates_dir: Path | None = None
+) -> str:
+    templates_section = (
+        f'\n[templates]\ndir = "{templates_dir.as_posix()}"\n'
+        if templates_dir is not None
+        else ""
+    )
+    return f"""
 [server]
 host = "127.0.0.1"
 port = {port}
@@ -77,9 +80,11 @@ remove_expired = true
 allow_absolute_paths = false
 allow_path_traversal = false
 hide_host_paths = true
-"""
-    )
+{templates_section}"""
 
+
+@contextlib.contextmanager
+def _running_server(config_path: Path, port: int):
     proc = subprocess.Popen(
         [str(_server_binary()), "--config", str(config_path)],
         stdout=subprocess.PIPE,
@@ -94,6 +99,32 @@ hide_host_paths = true
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             proc.kill()
+
+
+@pytest.fixture()
+def server_base_url(tmp_path: Path):
+    port = _free_port()
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(_config_text(port, tmp_path / "data"))
+    with _running_server(config_path, port) as url:
+        yield url
+
+
+@pytest.fixture()
+def server_with_templates(tmp_path: Path):
+    """A server configured with a templates dir, plus one seeded template
+    `sdkdemo` containing `seed.txt`."""
+    port = _free_port()
+    templates_root = tmp_path / "templates"
+    tpl = templates_root / "sdkdemo"
+    tpl.mkdir(parents=True)
+    (tpl / "seed.txt").write_text("from template via sdk")
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        _config_text(port, tmp_path / "data", templates_dir=templates_root)
+    )
+    with _running_server(config_path, port) as url:
+        yield url
 
 
 @pytest.fixture()

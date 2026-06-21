@@ -16,7 +16,14 @@ use crate::state::AppState;
 /// REST API until the process is killed or the listener fails.
 pub async fn run(config_path: &Path) -> Result<(), LightSandboxError> {
     let app_config = AppConfig::load(config_path)?;
-    let runtime = Arc::new(LocalProcessRuntime::new(app_config.runtime_config()));
+
+    // Build the concrete runtime so we can prewarm the pool (a
+    // LocalProcessRuntime-specific concern) before erasing to the trait object.
+    let runtime = LocalProcessRuntime::new(app_config.runtime_config());
+    if app_config.pool.enabled {
+        runtime.prewarm().await;
+    }
+    let runtime: Arc<dyn lightsandbox_core::SandboxRuntime> = Arc::new(runtime);
     let state = Arc::new(AppState {
         runtime: runtime.clone(),
     });

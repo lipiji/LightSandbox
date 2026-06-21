@@ -23,8 +23,16 @@ class LightSandboxClient:
         ttl_seconds: int | None = None,
         metadata: dict[str, str] | None = None,
         env: dict[str, str] | None = None,
+        template: str | None = None,
     ) -> Sandbox:
-        payload = _drop_none({"ttl_seconds": ttl_seconds, "metadata": metadata, "env": env})
+        payload = _drop_none(
+            {
+                "ttl_seconds": ttl_seconds,
+                "metadata": metadata,
+                "env": env,
+                "template": template,
+            }
+        )
         data = self._request("POST", "/v1/sandboxes", json=payload)
         return Sandbox(self, data["id"], info=data)
 

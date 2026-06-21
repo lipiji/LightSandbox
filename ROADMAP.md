@@ -15,7 +15,7 @@
 
 ## v0.2
 - Streaming exec output
-- Sandbox pool (warm pool + reusable templates, in-process — no Kubernetes needed)
+- Sandbox templates + warm pool (in-process — no Kubernetes needed)
 - E2B-compatible API subset (pure API-shape work, no new runtime dependency)
 - SQLite metadata persistence
 - File upload/download multipart
