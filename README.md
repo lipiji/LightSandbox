@@ -1,5 +1,7 @@
 # LightSandbox
 
+![CI](https://github.com/lipiji/LightSandbox/actions/workflows/ci.yml/badge.svg)
+
 LightSandbox is a lightweight sandbox runtime for AI agents.
 
 It provides a simple REST API, Python SDK, and CLI for creating isolated workspaces, executing commands, reading/writing files, enforcing timeouts, and cleaning up agent tasks.

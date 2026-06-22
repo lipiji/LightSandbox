@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+# Failures here are real signals, not flakes from one platform: keep both
+# OSes independent so a regression on one still reports the other.
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # The project ships explicit Windows and Unix code paths
+        # (cmd/sh shells, taskkill/process-group kills, python discovery),
+        # so CI exercises both. The build has no C dependency (persistence
+        # is redb, pure Rust) and no toolchain pinning, so it is MSVC-clean.
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo test (workspace)
+        run: cargo test --workspace
+
+      # The Python SDK test suite spawns the real server binary, so build it
+      # explicitly (cargo test does not guarantee the runnable bin exists).
+      - name: Build server binary for SDK tests
+        run: cargo build -p lightsandbox-server
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install SDK + test deps
+        run: pip install -e ".[test]"
+        working-directory: sdk/python
+
+      - name: Python SDK tests
+        run: python -m pytest tests/
+        working-directory: sdk/python
