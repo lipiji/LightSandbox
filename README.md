@@ -8,7 +8,7 @@ It provides a simple REST API, Python SDK, and CLI for creating isolated workspa
 
 LightSandbox v0.1 starts with a zero-Docker `LocalProcessRuntime` for trusted local workloads. Stronger isolation backends such as Docker, gVisor, Firecracker, and Kubernetes are planned as optional runtimes.
 
-> **Status: v0.1, work in progress.** See [ROADMAP.md](ROADMAP.md) for what's implemented vs. planned, and [docs/security.md](docs/security.md) before running untrusted code.
+> **Status: v0.2.** See [ROADMAP.md](ROADMAP.md) for what's implemented vs. planned, and [docs/security.md](docs/security.md) before running untrusted code.
 
 ## Why LightSandbox
 
@@ -42,15 +42,25 @@ LightSandbox also exposes a lifecycle-only [E2B-compatible API subset](docs/e2b-
 ## Quick start
 
 ```bash
-# build and run the server
-cargo run -p lightsandbox-server -- --config config.example.toml
+# 1. build
+cargo build --workspace
 
-# in another terminal
-curl http://127.0.0.1:8080/health
-# {"status":"ok"}
+# 2. start the server (background) and wait until it's ready
+cargo run -q -p lightsandbox-server -- --config config.example.toml &
+until curl -sf http://127.0.0.1:8080/health >/dev/null; do sleep 0.3; done
+curl -s http://127.0.0.1:8080/health        # {"status":"ok"}
+
+# 3. end-to-end: create → write → exec → read → remove
+#    (POSIX shell only — grep/cut, no jq or python required)
+CLI="cargo run -q -p lightsandbox-cli --"
+ID=$($CLI --json create | grep -oE '"id":"sbx_[0-9a-f]+"' | cut -d'"' -f4)
+$CLI write "$ID" README.md note.md
+$CLI --json exec "$ID" "echo hello from inside the sandbox"
+$CLI --json read "$ID" note.md
+$CLI --json rm "$ID"
 ```
 
-See [docs/quickstart.md](docs/quickstart.md) for the full create → write → exec → remove walkthrough.
+Works on macOS, Linux, and Git Bash on Windows. The Python-SDK walkthrough (context-manager handle, streaming exec, binary upload/download) is in [docs/quickstart.md](docs/quickstart.md).
 
 ## REST API example
 
