@@ -146,7 +146,11 @@ async fn exec_python_succeeds() {
         }
     };
     #[cfg(not(windows))]
-    let cmd = "python3 -c print(1+1)".to_string();
+    // The runtime hands `cmd` to `sh -c <cmd>` on Unix, so the python
+    // argument must be quoted — bare `print(1+1)` makes `sh` choke on the
+    // parens (`syntax error near unexpected token '('`). `cmd` on Windows
+    // doesn't care, hence the unquoted form in the windows branch above.
+    let cmd = "python3 -c \"print(1+1)\"".to_string();
 
     let result = rt
         .exec(
