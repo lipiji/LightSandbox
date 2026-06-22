@@ -172,3 +172,50 @@ impl Default for RuntimeConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sandbox_id_has_stable_format() {
+        // The id is the public handle clients pass to every other call, so its
+        // shape is part of the API contract: `sbx_` prefix + exactly 12 hex
+        // chars (16 total). The 12 chars are the first 12 of a UUID v4's
+        // simple (lowercase-hex) form.
+        let id = SandboxId::new();
+        let s = id.as_str();
+        assert_eq!(s.len(), 16, "id must be 16 chars: sbx_ + 12 hex, got {s}");
+        assert!(s.starts_with("sbx_"));
+        let suffix = &s[4..];
+        assert_eq!(suffix.len(), 12);
+        assert!(
+            suffix
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "suffix must be lowercase hex: {suffix}"
+        );
+    }
+
+    #[test]
+    fn sandbox_ids_are_unique() {
+        // 12 hex chars = ~48 bits of entropy; collisions across a few thousand
+        // generates should never happen. Guards against a regression that
+        // seeds the RNG identically or truncates the wrong part of the UUID.
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..5000 {
+            let id = SandboxId::new();
+            assert!(
+                seen.insert(id.as_str().to_string()),
+                "duplicate id generated"
+            );
+        }
+    }
+
+    #[test]
+    fn sandbox_id_display_matches_inner() {
+        let id = SandboxId::new();
+        assert_eq!(id.to_string(), id.as_str());
+        assert_eq!(format!("{id}"), id.as_str());
+    }
+}

@@ -169,4 +169,33 @@ mod tests {
         assert_eq!(snap.gc_runs_total, 1);
         assert_eq!(snap.gc_removed_total, 3);
     }
+
+    #[test]
+    fn timeout_records_separately_but_still_counts_as_exec() {
+        // A timed-out exec must bump exec_timed_out_total *and* still be
+        // counted in exec_total and the duration histogram — timeouts are a
+        // subset of execs, not a separate stream.
+        let c = MetricsCollector::new();
+        c.record_exec(100, true);
+        let snap = c.snapshot(0);
+        assert_eq!(snap.exec_total, 1);
+        assert_eq!(snap.exec_timed_out_total, 1);
+        assert_eq!(snap.exec_duration.count, 1);
+        // 100ms lands in every bucket whose bound >= 100 (index 2 = le=0.1s)
+        // and in +Inf.
+        assert_eq!(snap.exec_duration.bucket_counts[2], 1);
+        assert_eq!(*snap.exec_duration.bucket_counts.last().unwrap(), 1);
+    }
+
+    #[test]
+    fn gc_removed_zero_is_a_noop() {
+        // cleanup_expired returns 0 most ticks; that must not inflate the
+        // removed counter (guarded by the `n > 0` check).
+        let c = MetricsCollector::new();
+        c.record_gc_removed(0);
+        assert_eq!(c.snapshot(0).gc_removed_total, 0);
+        // A real reaping still records correctly afterwards.
+        c.record_gc_removed(2);
+        assert_eq!(c.snapshot(0).gc_removed_total, 2);
+    }
 }

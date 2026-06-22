@@ -287,3 +287,78 @@ async fn download_file(
     )
         .into_response())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Exercises the `ApiError` -> HTTP status mapping exhaustively. This is
+    /// the REST API's error contract; only `SandboxNotFound -> 404` is
+    /// reachable through the existing HTTP-level tests, so the rest of the
+    /// matrix (some of which is awkward to trigger via endpoints — e.g.
+    /// `SandboxExpired` needs a timed-out sandbox, `OutputTooLarge` needs a
+    /// custom read cap) is pinned here at the mapping itself.
+    #[test]
+    fn error_variants_map_to_documented_status_codes() {
+        fn status_of(err: LightSandboxError) -> StatusCode {
+            ApiError(err).into_response().status()
+        }
+
+        assert_eq!(
+            status_of(LightSandboxError::SandboxNotFound),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            status_of(LightSandboxError::SandboxExpired),
+            StatusCode::GONE
+        );
+        assert_eq!(
+            status_of(LightSandboxError::InvalidPath("x".into())),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            status_of(LightSandboxError::ExecTimeout),
+            StatusCode::REQUEST_TIMEOUT
+        );
+        assert_eq!(
+            status_of(LightSandboxError::ExecFailed("boom".into())),
+            StatusCode::BAD_GATEWAY
+        );
+        // Both size-limit errors collapse to 413.
+        assert_eq!(
+            status_of(LightSandboxError::FileTooLarge),
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+        assert_eq!(
+            status_of(LightSandboxError::OutputTooLarge),
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+        assert_eq!(
+            status_of(LightSandboxError::RuntimeError("oops".into())),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(
+            status_of(LightSandboxError::ConfigError("bad".into())),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(
+            status_of(LightSandboxError::InternalError),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    /// Every error response carries the stable `{"error":{"code","message"}}`
+    /// envelope regardless of variant — a sample check here complements the
+    /// full status matrix above and guards the body shape at the mapping layer.
+    #[tokio::test]
+    async fn error_response_carries_stable_envelope() {
+        let response = ApiError(LightSandboxError::FileTooLarge).into_response();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["error"]["code"], "FILE_TOO_LARGE");
+        assert!(value["error"]["message"].is_string());
+    }
+}

@@ -2,7 +2,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use lightsandbox_core::{
-    ExecOutputEvent, ExecRequest, ResourceLimits, RuntimeConfig, SandboxRuntime, SandboxSpec,
+    ExecOutputEvent, ExecRequest, LightSandboxError, ResourceLimits, RuntimeConfig, SandboxRuntime,
+    SandboxSpec,
 };
 use lightsandbox_runtime_local::LocalProcessRuntime;
 
@@ -23,6 +24,24 @@ fn test_runtime(root: &std::path::Path) -> LocalProcessRuntime {
     let config = RuntimeConfig {
         workspace_root: root.to_path_buf(),
         limits: test_limits(),
+        allow_absolute_paths: false,
+        allow_path_traversal: false,
+        hide_host_paths: true,
+        remove_expired: true,
+        templates_dir: None,
+        pool_enabled: false,
+        pool_min_idle: 0,
+        persistence_db_path: None,
+    };
+    LocalProcessRuntime::new(config).expect("test runtime builds")
+}
+
+/// Like `test_runtime`, but with caller-supplied limits — for tests that need
+/// a specific `max_sandboxes`, output cap, or read/write size cap.
+fn runtime_with_limits(root: &std::path::Path, limits: ResourceLimits) -> LocalProcessRuntime {
+    let config = RuntimeConfig {
+        workspace_root: root.to_path_buf(),
+        limits,
         allow_absolute_paths: false,
         allow_path_traversal: false,
         hide_host_paths: true,
@@ -679,4 +698,168 @@ async fn persistence_removed_sandbox_is_gone_after_restart() {
     assert_eq!(listed.len(), 1, "only the non-removed sandbox survives");
     assert!(listed.iter().any(|s| s.id == kept));
     assert!(!listed.iter().any(|s| s.id == removed));
+}
+
+// --- resource-limit enforcement ---
+
+#[tokio::test]
+async fn max_sandboxes_limit_is_enforced() {
+    // Capacity is a semaphore whose permits are held for each sandbox's
+    // lifetime. A create past the limit must surface a RuntimeError rather
+    // than block or silently succeed; removing one must release its permit.
+    let root = temp_dir("max_sandboxes");
+    let limits = ResourceLimits {
+        max_sandboxes: 2,
+        ..test_limits()
+    };
+    let rt = runtime_with_limits(&root, limits);
+
+    rt.create(SandboxSpec::default()).await.unwrap();
+    rt.create(SandboxSpec::default()).await.unwrap();
+
+    let err = rt.create(SandboxSpec::default()).await.unwrap_err();
+    assert!(
+        matches!(err, LightSandboxError::RuntimeError(_)),
+        "over-capacity create should be a RuntimeError, got {err:?}"
+    );
+
+    // Removing one frees a slot, so a new create succeeds again.
+    let oldest = rt.list().await.unwrap();
+    rt.remove(&oldest[0].id).await.unwrap();
+    rt.create(SandboxSpec::default())
+        .await
+        .expect("create should succeed after a slot was freed");
+}
+
+#[tokio::test]
+async fn stdout_size_cap_truncates_without_erroring() {
+    // `capped_read` keeps the first `max_stdout_bytes` and drains the rest,
+    // so an oversized stdout is truncated, not failed — the command still
+    // reports a clean exit and the process never blocks on a full pipe.
+    let root = temp_dir("stdout_cap");
+    let limits = ResourceLimits {
+        max_stdout_bytes: 8,
+        ..test_limits()
+    };
+    let rt = runtime_with_limits(&root, limits);
+    let info = rt.create(SandboxSpec::default()).await.unwrap();
+
+    let result = rt
+        .exec(
+            &info.id,
+            ExecRequest {
+                cmd: echo_cmd("abcdefghijklmnopqrstuvwxyz"),
+                timeout_seconds: None,
+                env: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(result.exit_code, 0, "echo should still succeed");
+    assert!(!result.timed_out);
+    assert!(
+        result.stdout.len() <= 8,
+        "stdout must be capped at 8 bytes, got {}: {:?}",
+        result.stdout.len(),
+        result.stdout
+    );
+    assert!(
+        !result.stdout.is_empty(),
+        "some output should still come through"
+    );
+}
+
+#[tokio::test]
+async fn oversized_read_is_rejected() {
+    // Symmetric counterpart to `oversized_file_write_is_rejected`: a file
+    // written within the write cap but over the (smaller) read cap must fail
+    // with OUTPUT_TOO_LARGE rather than returning a huge body.
+    let root = temp_dir("read_oversize");
+    let limits = ResourceLimits {
+        max_read_file_bytes: 16,
+        ..test_limits()
+    };
+    let rt = runtime_with_limits(&root, limits);
+    let info = rt.create(SandboxSpec::default()).await.unwrap();
+
+    // 64 bytes: within the 1024-byte write cap, over the 16-byte read cap.
+    rt.write_file(&info.id, "data.bin", vec![0u8; 64])
+        .await
+        .unwrap();
+
+    let err = rt.read_file(&info.id, "data.bin").await.unwrap_err();
+    assert!(
+        matches!(err, LightSandboxError::OutputTooLarge),
+        "oversized read should be OutputTooLarge, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn exec_merges_request_env_over_sandbox_env() {
+    // exec clones the sandbox's env, then layers the request's env on top
+    // (`merged_env.extend(req.env)`). So sandbox-only vars survive, request
+    // vars are added, and on conflict the request value wins.
+    let root = temp_dir("env_merge");
+    let rt = test_runtime(&root);
+    let info = rt
+        .create(SandboxSpec {
+            ttl_seconds: None,
+            metadata: None,
+            env: Some(
+                [
+                    ("BASE".to_string(), "from_sandbox".to_string()),
+                    ("SHARED".to_string(), "sandbox_value".to_string()),
+                ]
+                .into(),
+            ),
+            template: None,
+        })
+        .await
+        .unwrap();
+
+    #[cfg(windows)]
+    let cmd = "echo %BASE% %SHARED% %EXTRA%";
+    #[cfg(not(windows))]
+    let cmd = "echo $BASE $SHARED $EXTRA";
+
+    let result = rt
+        .exec(
+            &info.id,
+            ExecRequest {
+                cmd: cmd.to_string(),
+                timeout_seconds: None,
+                env: Some(
+                    [
+                        ("SHARED".to_string(), "request_value".to_string()),
+                        ("EXTRA".to_string(), "from_request".to_string()),
+                    ]
+                    .into(),
+                ),
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(result.exit_code, 0);
+    let out = result.stdout;
+    // BASE: only in the sandbox env -> present.
+    assert!(
+        out.contains("from_sandbox"),
+        "BASE should come from sandbox env: {out:?}"
+    );
+    // SHARED: in both -> request wins, sandbox value must not leak.
+    assert!(
+        out.contains("request_value"),
+        "SHARED should be overridden by the request: {out:?}"
+    );
+    assert!(
+        !out.contains("sandbox_value"),
+        "SHARED's sandbox value must not survive the override: {out:?}"
+    );
+    // EXTRA: only in the request -> present.
+    assert!(
+        out.contains("from_request"),
+        "EXTRA should come from the request env: {out:?}"
+    );
 }

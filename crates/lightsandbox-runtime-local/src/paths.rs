@@ -88,4 +88,51 @@ mod tests {
         let resolved = safe_path(&root, "../escape.txt", false, true).unwrap();
         assert_eq!(resolved, root.join("..").join("escape.txt"));
     }
+
+    #[test]
+    fn rejects_empty_and_whitespace_only_path() {
+        let root = PathBuf::from("/workspace/sbx_1");
+        assert!(safe_path(&root, "", false, false).is_err());
+        assert!(safe_path(&root, "   ", false, false).is_err());
+        assert!(safe_path(&root, "\t\n", false, false).is_err());
+    }
+
+    #[test]
+    fn rejects_drive_letter_path() {
+        // `C:` / `D:` style drive letters are caught by the second-byte colon
+        // check before any normalization runs, so they can't reach the
+        // workspace as an absolute Windows path.
+        let root = PathBuf::from("/workspace/sbx_1");
+        assert!(safe_path(&root, "C:file.txt", false, false).is_err());
+        assert!(safe_path(&root, "D:stuff", false, false).is_err());
+    }
+
+    #[test]
+    fn normalizes_backslashes_to_slashes() {
+        // A Windows-style relative path with backslashes must resolve the same
+        // as its forward-slash form — otherwise `a\b\c.txt` would be treated
+        // as a single literal filename on Unix workspace roots.
+        let root = PathBuf::from("/workspace/sbx_1");
+        let resolved = safe_path(&root, "a\\b\\c.txt", false, false).unwrap();
+        assert_eq!(resolved, root.join("a").join("b").join("c.txt"));
+    }
+
+    #[test]
+    fn collapses_dot_and_empty_segments() {
+        let root = PathBuf::from("/workspace/sbx_1");
+        let resolved = safe_path(&root, "./a//b/./c.txt", false, false).unwrap();
+        assert_eq!(resolved, root.join("a").join("b").join("c.txt"));
+
+        // A bare `.` resolves to the workspace root itself (no segments kept).
+        assert_eq!(safe_path(&root, ".", false, false).unwrap(), root);
+    }
+
+    #[test]
+    fn strips_leading_slash_when_absolute_allowed() {
+        // With allow_absolute=true, a leading slash is treated as
+        // workspace-root-relative (stripped), not host-root-relative.
+        let root = PathBuf::from("/workspace/sbx_1");
+        let resolved = safe_path(&root, "/x/y.txt", true, false).unwrap();
+        assert_eq!(resolved, root.join("x").join("y.txt"));
+    }
 }
