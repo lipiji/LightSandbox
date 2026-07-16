@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/lightsandbox-core",
     "crates/lightsandbox-runtime-local",
+    "crates/lightsandbox-runtime-docker",
     "crates/lightsandbox-server",
     "crates/lightsandbox-cli",
 ]

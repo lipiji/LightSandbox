@@ -391,6 +391,71 @@ async fn concurrent_create_does_not_crash() {
 }
 
 #[tokio::test]
+async fn concurrent_exec_in_distinct_sandboxes_is_isolated() {
+    // The project's headline claim is high-concurrency command execution.
+    // create-concurrency is covered above; this stresses the *exec* path:
+    // many sandboxes running commands at once, each through the shared
+    // runtime (DashMap + exec semaphore + per-exec env clone). A bug that
+    // let one sandbox's env or workspace state bleed into another under load
+    // would surface here as a mismatched marker.
+    let root = temp_dir("concurrent_exec");
+    let rt = std::sync::Arc::new(test_runtime(&root));
+    const N: usize = 16;
+
+    #[cfg(windows)]
+    let echo_marker = "echo %MARKER%";
+    #[cfg(not(windows))]
+    let echo_marker = "echo $MARKER";
+
+    let mut handles = Vec::new();
+    for i in 0..N {
+        let rt = rt.clone();
+        let marker = format!("marker-{i}");
+        handles.push(tokio::spawn(async move {
+            // Each sandbox carries its own MARKER env value.
+            let info = rt
+                .create(SandboxSpec {
+                    ttl_seconds: None,
+                    metadata: None,
+                    env: Some([("MARKER".to_string(), marker.clone())].into()),
+                    template: None,
+                })
+                .await
+                .unwrap();
+            // Concurrent exec; max_concurrent_exec in test_limits (50) > N,
+            // so all of these actually run in parallel.
+            let result = rt
+                .exec(
+                    &info.id,
+                    ExecRequest {
+                        cmd: echo_marker.to_string(),
+                        timeout_seconds: None,
+                        env: None,
+                    },
+                )
+                .await
+                .unwrap();
+            (i, marker, result)
+        }));
+    }
+
+    for h in handles {
+        let (i, marker, result) = h.await.unwrap();
+        assert_eq!(
+            result.exit_code, 0,
+            "task {i} exec failed: stderr={}",
+            result.stderr
+        );
+        assert!(
+            result.stdout.contains(&marker),
+            "task {i} should see only its own marker {marker:?}, got {:?} \
+             (env/workspace state leaked across concurrent execs)",
+            result.stdout
+        );
+    }
+}
+
+#[tokio::test]
 async fn metrics_reflect_operations() {
     let root = temp_dir("metrics");
     let rt = test_runtime(&root);

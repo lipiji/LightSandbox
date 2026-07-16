@@ -21,3 +21,10 @@ libc = "0.2"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+
+# Hand-rolled timing harness (benches/runtime.rs) with its own `main` — no
+# `criterion` (it pulls `windows-sys`, which needs `dlltool` from MinGW
+# binutils that this Windows-gnu toolchain lacks). Zero extra deps.
+[[bench]]
+name = "runtime"
+harness = false

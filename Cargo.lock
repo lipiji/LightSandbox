@@ -823,6 +823,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "lightsandbox-runtime-docker"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "dashmap",
+ "lightsandbox-core",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "lightsandbox-runtime-local"
 version = "0.1.0"
 dependencies = [

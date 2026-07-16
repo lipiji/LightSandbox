@@ -67,7 +67,8 @@ fn start_server() -> (String, tempfile::TempDir) {
 
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let _ = rt.block_on(lightsandbox_server::run(&config_path));
+        let config = lightsandbox_server::config::AppConfig::load(&config_path).unwrap();
+        let _ = rt.block_on(lightsandbox_server::run(config));
     });
 
     let addr = format!("127.0.0.1:{port}");

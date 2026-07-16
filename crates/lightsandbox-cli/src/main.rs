@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use clap::{Parser, Subcommand};
 use futures_util::StreamExt;
 use lightsandbox_core::{ExecRequest, SandboxSpec};
+use lightsandbox_server::config::AppConfig;
 use serde_json::{json, Value};
 
 #[derive(Parser, Debug)]
@@ -25,8 +26,10 @@ struct Cli {
 enum Commands {
     /// Run the lightsandbox-server (foreground).
     Server {
-        #[arg(long, default_value = "config.example.toml")]
-        config: PathBuf,
+        /// Path to a TOML config file. If omitted, auto-discovers
+        /// lightsandbox.toml in the current directory or uses built-in defaults.
+        #[arg(long)]
+        config: Option<PathBuf>,
     },
     /// Create a new sandbox.
     Create {
@@ -84,7 +87,32 @@ async fn main() {
 
     let result = match cli.command {
         Commands::Server { config } => {
-            if let Err(e) = lightsandbox_server::run(&config).await {
+            let config_path = config.or_else(|| {
+                let local = PathBuf::from("lightsandbox.toml");
+                if local.exists() {
+                    Some(local)
+                } else {
+                    None
+                }
+            });
+            let app_config = match AppConfig::load_or_default(config_path.as_deref()) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("config error: {e}");
+                    std::process::exit(1);
+                }
+            };
+            let workspace = PathBuf::from(&app_config.runtime.workspace_root);
+            if !workspace.exists() {
+                if let Err(e) = std::fs::create_dir_all(&workspace) {
+                    eprintln!(
+                        "error: could not create workspace directory {}: {e}",
+                        workspace.display()
+                    );
+                    std::process::exit(1);
+                }
+            }
+            if let Err(e) = lightsandbox_server::run(app_config).await {
                 eprintln!("server error: {e}");
                 std::process::exit(1);
             }
