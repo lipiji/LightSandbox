@@ -1,58 +1,101 @@
 # LightSandbox
 
 ![CI](https://github.com/lipiji/LightSandbox/actions/workflows/ci.yml/badge.svg)
+![Release](https://github.com/lipiji/LightSandbox/actions/workflows/release.yml/badge.svg)
 
-LightSandbox is a lightweight sandbox runtime for AI agents.
+**Self-hosted sandbox execution for AI agents. Run anywhere — laptop to cloud.**
 
-It provides a simple REST API, Python SDK, and CLI for creating isolated workspaces, executing commands, reading/writing files, enforcing timeouts, and cleaning up agent tasks.
-
-LightSandbox v0.1 starts with a zero-Docker `LocalProcessRuntime` for trusted local workloads. Stronger isolation backends such as Docker, gVisor, Firecracker, and Kubernetes are planned as optional runtimes.
+LightSandbox is a REST API server that gives AI agents (Claude Code, Codex, or any HTTP client) isolated workspaces to execute commands, read/write files, and manage sandbox lifecycles. Deploy it on your laptop, a VPS, or a Kubernetes cluster — agents connect over HTTP and never touch your host directly.
 
 > **Status: v0.2.** See [ROADMAP.md](ROADMAP.md) for what's implemented vs. planned, and [docs/security.md](docs/security.md) before running untrusted code.
 
 ## Why LightSandbox
 
-Existing AI agent sandboxes tend to be either a raw `subprocess.run()` call (no lifecycle management, no limits, no cleanup) or a full container/microVM platform (Docker, Kubernetes, Firecracker) that's heavy to install and operate for a single developer, a research project, or a private deployment.
+Existing options are either a raw `subprocess.run()` call (no lifecycle, no limits, no cleanup) or a full cloud sandbox API (E2B, Daytona) that requires an account and sends your code to someone else's infrastructure.
 
-LightSandbox aims for the middle: more engineered than raw subprocess, lighter than Docker, and more suited to local and private-first AI agent development than a cloud sandbox API.
+LightSandbox aims for the middle: more engineered than raw subprocess, lighter than Docker, fully self-hostable, and E2B API-compatible so existing agent tooling drops right in.
 
-## Core features
+## Install
 
-- **No required dependencies**: v0.1 runs with no Docker, Kubernetes, database, Redis, or message queue.
-- **Sandbox lifecycle**: create, list, get, exec, read/write files, remove — with TTL and background GC.
-- **Concurrency-aware**: designed for multiple agents creating sandboxes and running commands at the same time.
-- **REST API, Python SDK, and CLI**, all built on the same HTTP surface.
-- **Observable**: a Prometheus `/metrics` endpoint exposes sandbox/exec/GC counters and an exec-duration histogram, scrapable with no extra config.
-- **Templates**: create a sandbox from a named template directory so it starts pre-populated with files/dependencies — no per-sandbox `write_file` churn.
-- **Runtime-agnostic core**: a single `SandboxRuntime` trait, implemented today by `LocalProcessRuntime`, with `DockerRuntime`, `KubernetesRuntime`, `FirecrackerRuntime`, and others as future, optional backends behind the same interface.
-- **Honest about its security boundary**: see below.
+### macOS
 
-## How it compares
+```bash
+brew tap lipiji/lightsandbox
+brew install lightsandbox
+```
 
-| | LightSandbox v0.1 | Docker-based sandbox | OpenSandbox / agent-sandbox | E2B | CubeSandbox |
-|---|---|---|---|---|---|
-| Install footprint | Just the binary | Docker daemon required | Container runtime required | Cloud-hosted | Hardware isolation, heavier infra |
-| Isolation strength | None (trusted workloads only) | Container-level | Container-level | Strong (cloud microVM) | Strong (hardware-assisted) |
-| Best for | Local agent dev, trusted code, private deployments | Self-hosted, semi-trusted code | Kubernetes-native agent workloads | Untrusted code, no local infra | High-concurrency, low cold-start untrusted code |
+### Linux
 
-LightSandbox v0.1 does not try to match the isolation guarantees of the others — it trades isolation strength for installation simplicity and is meant to be replaced or supplemented with a stronger runtime when untrusted code execution is required.
+```bash
+curl -fsSL https://raw.githubusercontent.com/lipiji/LightSandbox/master/scripts/install.sh | sh
+```
 
-LightSandbox also exposes a lifecycle-only [E2B-compatible API subset](docs/e2b-compat.md) (`/e2b/sandboxes`) alongside its native API, for tooling already written against E2B's control plane.
+### Windows
+
+```powershell
+iwr https://raw.githubusercontent.com/lipiji/LightSandbox/master/scripts/install.ps1 | iex
+```
+
+### Download a binary directly
+
+Pre-built binaries for every platform are attached to each [GitHub Release](https://github.com/lipiji/LightSandbox/releases):
+
+| Platform | File |
+|----------|------|
+| Linux x86_64 (static) | `lightsandbox-server-linux-x86_64` |
+| Linux arm64 (static) | `lightsandbox-server-linux-arm64` |
+| macOS Apple Silicon | `lightsandbox-server-macos-arm64` |
+| macOS Intel | `lightsandbox-server-macos-x86_64` |
+| Windows x86_64 | `lightsandbox-server-windows-x86_64.exe` |
+
+### Build from source
+
+```bash
+cargo build --release -p lightsandbox-server
+```
+
+Requires Rust stable. No Docker, no C toolchain, no system dependencies.
 
 ## Quick start
 
 ```bash
-# 1. build
-cargo build --workspace
+# start the server — no config file needed
+lightsandbox-server
 
-# 2. start the server (background) and wait until it's ready
-cargo run -q -p lightsandbox-server -- --config config.example.toml &
-until curl -sf http://127.0.0.1:8080/health >/dev/null; do sleep 0.3; done
-curl -s http://127.0.0.1:8080/health        # {"status":"ok"}
+# or from source
+cargo run -p lightsandbox-server
+```
 
-# 3. end-to-end: create → write → exec → read → remove
-#    (POSIX shell only — grep/cut, no jq or python required)
-CLI="cargo run -q -p lightsandbox-cli --"
+The server starts on `127.0.0.1:8080` by default, creates `./data/workspaces/` automatically, and is ready immediately:
+
+```bash
+curl http://127.0.0.1:8080/health   # {"status":"ok"}
+```
+
+### Config (optional)
+
+Drop a `lightsandbox.toml` in your project directory to override any defaults — the server picks it up automatically:
+
+```toml
+[server]
+host = "0.0.0.0"   # expose to the network for remote agents
+port = 8080
+
+[runtime]
+workspace_root = "/var/lib/lightsandbox/workspaces"
+
+[limits]
+max_sandboxes = 200
+default_ttl_seconds = 1800
+```
+
+All fields are optional — omit any section to keep the built-in default. See [`config.example.toml`](config.example.toml) for the full reference.
+
+### End-to-end demo
+
+```bash
+# create → write → exec → read → remove
+CLI="lightsandbox"                  # or: cargo run -q -p lightsandbox-cli --
 ID=$($CLI --json create | grep -oE '"id":"sbx_[0-9a-f]+"' | cut -d'"' -f4)
 $CLI write "$ID" README.md note.md
 $CLI --json exec "$ID" "echo hello from inside the sandbox"
@@ -60,9 +103,55 @@ $CLI --json read "$ID" note.md
 $CLI --json rm "$ID"
 ```
 
-Works on macOS, Linux, and Git Bash on Windows. The Python-SDK walkthrough (context-manager handle, streaming exec, binary upload/download) is in [docs/quickstart.md](docs/quickstart.md).
+Works on macOS, Linux, and Git Bash on Windows. The Python SDK walkthrough (streaming exec, binary upload/download) is in [docs/quickstart.md](docs/quickstart.md).
 
-## REST API example
+## Deployment
+
+LightSandbox is a single stateless binary — deploy it wherever agents can reach it:
+
+| Scenario | How |
+|----------|-----|
+| Local dev | `lightsandbox-server` — binds `127.0.0.1:8080` |
+| Cloud VPS | Set `host = "0.0.0.0"` in config, open port 8080 |
+| Docker | `docker run -p 8080:8080 lipiji/lightsandbox` _(coming soon)_ |
+| systemd service | See [docs/deployment.md](docs/quickstart.md) |
+
+Agents connect with the Python SDK or any HTTP client by pointing at the server URL:
+
+```python
+from lightsandbox import LightSandboxClient
+
+# local
+client = LightSandboxClient("http://127.0.0.1:8080")
+
+# remote
+client = LightSandboxClient("http://your-server.example.com:8080")
+```
+
+## Core features
+
+- **Zero-config startup**: download the binary and run it — no config file, no database, no Docker daemon.
+- **Run anywhere**: localhost, VPS, cloud VM, or Kubernetes — same binary, same API.
+- **Sandbox lifecycle**: create, list, get, exec, read/write files, remove — with TTL and background GC.
+- **Concurrency-aware**: designed for many agents creating sandboxes and running commands simultaneously.
+- **REST API + Python SDK + CLI**, all on the same HTTP surface.
+- **E2B-compatible API subset**: drop-in replacement for the E2B control plane at `/e2b/sandboxes`.
+- **Templates**: start a sandbox pre-populated from a named template directory — no per-sandbox file upload churn.
+- **Observable**: Prometheus `/metrics` endpoint with sandbox/exec/GC counters and exec-duration histogram.
+- **Runtime-agnostic core**: `LocalProcessRuntime` today; Docker, Firecracker, and Kubernetes runtimes behind the same `SandboxRuntime` trait in upcoming releases.
+
+## How it compares
+
+| | LightSandbox | E2B | Docker-based sandbox | Raw subprocess |
+|---|---|---|---|---|
+| Install | Single binary | Cloud account | Docker daemon | Nothing |
+| Self-hostable | Yes | No | Yes | Yes |
+| Isolation | Process (v0.2), Docker/VM (roadmap) | Strong (cloud microVM) | Container-level | None |
+| E2B API compatible | Yes | — | No | No |
+| Concurrency | High | High | Medium | Manual |
+| Best for | Self-hosted agent infra, local dev, private deployments | Untrusted code, no local infra | Semi-trusted self-hosted | Trusted scripts, no lifecycle needed |
+
+## REST API
 
 ```bash
 # create a sandbox
@@ -78,7 +167,7 @@ curl -X POST http://127.0.0.1:8080/v1/sandboxes/sbx_xxx/exec \
 
 Full endpoint reference: [docs/api.md](docs/api.md).
 
-## Python SDK example
+## Python SDK
 
 ```python
 from lightsandbox import LightSandboxClient
@@ -91,9 +180,12 @@ with client.create(ttl_seconds=300) as sbx:
     print(result.stdout)
 ```
 
-## CLI example
+Install: `pip install lightsandbox`
+
+## CLI
 
 ```bash
+lightsandbox server                         # start the server
 lightsandbox create --json
 lightsandbox exec sbx_xxx "python -V"
 lightsandbox write sbx_xxx ./local.py main.py
@@ -101,14 +193,13 @@ lightsandbox read sbx_xxx main.py
 lightsandbox rm sbx_xxx
 ```
 
-## LocalProcessRuntime security boundary
+## Security boundary
 
-LocalProcessRuntime is designed for trusted workloads and local AI agent development. For untrusted code execution, use DockerRuntime, gVisor, Firecracker, or another stronger isolation backend.
+`LocalProcessRuntime` is for **trusted workloads and local AI agent development**. It provides workspace isolation, path-traversal checks, timeouts, output limits, and TTL/GC — but not OS-level sandboxing. A process running inside can still reach the host filesystem and network.
 
-It is **not** a strong security isolation environment. A process run by LocalProcessRuntime can, in principle, still access anything the host process can: the filesystem, the network, spawning further subprocesses, and host CPU/memory. LightSandbox manages it (workspace isolation, path traversal checks, timeouts, output limits, TTL/GC) but does not sandbox it at the OS/kernel level.
+For untrusted code, use the upcoming Docker or Firecracker runtime (v0.3+).
 
-Use it for: local agent development, trusted code, research scripts, internal automation, private tool calls.
-Do not use it to run code from untrusted users directly. See [docs/security.md](docs/security.md) for details.
+See [docs/security.md](docs/security.md) for the full threat model.
 
 ## Roadmap
 
